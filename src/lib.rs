@@ -278,3 +278,107 @@ where
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+
+    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use wgpu::{
+        DeviceDescriptor, Features, InstanceDescriptor, Limits, RequestAdapterOptions,
+        ShaderModuleDescriptor,
+    };
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_computation_equivalence() {
+        let instance = wgpu::Instance::new(InstanceDescriptor::default());
+        let adapter = instance
+            .request_adapter(&RequestAdapterOptions {
+                force_fallback_adapter: false,
+                power_preference: wgpu::PowerPreference::None,
+                ..Default::default()
+            })
+            .await
+            .expect("Adapter must exist!");
+        let (device, queue) = adapter
+            .request_device(
+                &DeviceDescriptor {
+                    label: None,
+                    required_features: Features::BUFFER_BINDING_ARRAY
+                        | Features::STORAGE_RESOURCE_BINDING_ARRAY,
+                    required_limits: Limits::default(),
+                },
+                None,
+            )
+            .await
+            .expect("Device must have required features!");
+        const CS_SOURCE: &str = r#"
+                @group(0)
+                @binding(0)
+                var<storage, read> v_in_data: array<u32>;
+
+                @group(0)
+                @binding(1)
+                var<storage, read_write> v_out_data: array<u32>;
+
+                @group(0)
+                @binding(2)
+                var<uniform> goff: u32;
+
+                @compute
+                @workgroup_size(32)
+                fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+                    let actual_id = gid.x+goff;
+                    if (actual_id >= arrayLength(&v_in_data)){ return; }
+                    if (actual_id >= arrayLength(&v_out_data)){ return; }
+                    var e = v_in_data[actual_id];
+                    v_out_data[actual_id] = e*e;
+                }
+            "#;
+        let cs_module = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("Compute module"),
+            source: wgpu::ShaderSource::Wgsl(Cow::from(CS_SOURCE)),
+        });
+
+        let mut rng = StdRng::seed_from_u64(2);
+
+        let n_elem = 1024 * 1024;
+
+        let input_data = (0..n_elem)
+            .map(|_| rng.gen_range(0u32..=1000u32))
+            .collect::<Vec<_>>();
+
+        let mut res = vec![0u32; n_elem];
+        run_shader::<u32, u32>(RunShaderParams {
+            device: &device,
+            queue: &queue,
+            in_data: &input_data,
+            out_data: &mut res,
+            workgroup_len: 32,
+            n_workgroups: None,
+            program: &cs_module,
+            entry_point: "main",
+        })
+        .await
+        .unwrap();
+
+        // Cleanup resources on the gpu side
+        device.poll(wgpu::Maintain::wait()).panic_on_timeout();
+
+        use rayon::prelude::*;
+        let res2: Vec<u32> = input_data.par_iter().map(|value| value * value).collect();
+
+        assert_eq!(res.len(), res2.len());
+        for (i, (e1, e2)) in res.iter().zip(res2.iter()).enumerate() {
+            if e1 != e2 {
+                println!("Mismatch at {}!", i);
+                println!("GPU said: {}!", e1);
+                println!("CPU said: {}!", e2);
+                println!("Input was: {:?}", input_data[i]);
+                assert_eq!(e1, e2);
+            }
+        }
+    }
+}

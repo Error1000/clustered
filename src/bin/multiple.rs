@@ -32,14 +32,18 @@ async fn main() {
         if (actual_id >= arrayLength(&v_in_data)){ return; }
         if (actual_id >= arrayLength(&v_out_data)){ return; }
         var e = v_in_data[actual_id];
-        v_out_data[actual_id] = e+1;
+        var res: u32 = 1;
+        for(var i = 0; i < 1000; i++){
+            res *= e;
+        }
+        v_out_data[actual_id] = res;
     }
     "#;
     let instance = wgpu::Instance::new(InstanceDescriptor::default());
     let adapter = instance
         .request_adapter(&RequestAdapterOptions {
             force_fallback_adapter: false,
-            power_preference: wgpu::PowerPreference::HighPerformance,
+            power_preference: wgpu::PowerPreference::LowPower,
             ..Default::default()
         })
         .await
@@ -67,9 +71,9 @@ async fn main() {
     for _ in 0..100 {
         let fut = async {
             let mut rng = StdRng::seed_from_u64(4);
-            let mut outv = vec![0; 256 * 128 * 128];
+            let mut outv = vec![0; 128 * 1024];
             let mut inv = Vec::new();
-            inv.resize_with(256 * 128 * 128, || rng.gen_range(0..=1000));
+            inv.resize_with(outv.len(), || rng.gen_range(0..=1000));
             clustered::run_shader::<u32, u32>(RunShaderParams {
                 device: &device,
                 queue: &queue,
@@ -95,9 +99,9 @@ async fn main() {
     for _ in 0..100 {
         let fut = async {
             let mut rng = StdRng::seed_from_u64(4);
-            let mut outv = vec![0; 256 * 128 * 128];
+            let mut outv = vec![0; 128 * 1024];
             let mut inv = Vec::new();
-            inv.resize_with(256 * 128 * 128, || rng.gen_range(0..=1000));
+            inv.resize_with(outv.len(), || rng.gen_range(0..=1000));
             clustered::run_shader::<u32, u32>(RunShaderParams {
                 device: &device,
                 queue: &queue,
