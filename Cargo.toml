@@ -1,0 +1,22 @@
+[package]
+name = "clustered"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[[bin]]
+name="test-texture"
+
+[dependencies]
+env_logger = "0.11"
+log = "0.4"
+wgpu = { version = "0.20", features = ["spirv"] }
+tokio = {version = "1", features = ["full"] }
+shaderc = "0.8"
+bytemuck = "1.15"
+flume = "0.11"
+image = "0.25"
+rand = "0.8"
+rayon = "1.10"
+futures = "0.3"
