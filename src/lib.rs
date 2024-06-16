@@ -1,5 +1,4 @@
-use shader_bytes::{FromShaderBytes, IntoShaderBytes};
-use std::num::NonZeroUsize;
+use shader_bytes::{FromShaderBytes, IntoShaderBytes, ShaderBytes};
 use tokio::task::yield_now;
 use wgpu::{
     util::DeviceExt, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
@@ -18,7 +17,7 @@ async fn wgpu_map_helper(
     let (sender, reciver) = flume::bounded(1);
     buf_view.map_async(mode, move |mapping_res| sender.send(mapping_res).unwrap());
     loop {
-        device.poll(wgpu::MaintainBase::Poll);
+        let _ = device.poll(wgpu::MaintainBase::Poll);
         yield_now().await;
         if !reciver.is_empty() {
             break;
@@ -30,28 +29,19 @@ async fn wgpu_map_helper(
         .expect("Channel should not error out when mapping!")
 }
 
-fn div_round_up(a: usize, b: usize) -> usize {
-    let res = (a + b - 1) / b;
-    if a % b == 0 {
-        assert_eq!(res, a / b);
-    } else {
-        assert_eq!(res, (a / b) + 1);
-    }
-    res
-}
-
-pub struct RunShaderParams<'a, T, U> {
+pub struct RunShaderParams<'a, U> {
     pub device: &'a Device,
     pub queue: &'a Queue,
-    pub in_data: &'a [T],
+    pub in_data: ShaderBytes<'a>,
     pub out_data: &'a mut [U],
     pub workgroup_len: usize,
-    pub n_workgroups: Option<NonZeroUsize>,
+    pub n_workgroups: usize,
     pub program: &'a ShaderModule,
     pub entry_point: &'a str,
 }
+
 /* IDEA: This could maybe benefit from interning literally everything but the data
-   NOTE: Uses output slice length and input slice length are important and used to calculate the size of the shader input and output buffers
+   NOTE: Output slice length and input slice length are important and used to calculate the size of the shader input and output buffers
    NOTE: Assumes bind group 0 is used for the input and output
    NOTE: Assumes that the same buffer can't be used for input and output
          ^ These are not design choices, these can be changed if wanted
@@ -61,52 +51,32 @@ pub struct RunShaderParams<'a, T, U> {
             type erasure effectively takes place, meaning unless you programmed the shader
             to read the data correctly it won't know what type the data is
             and can easily lead to accidental type punning
-   WARNING: If the number of elements in the input is not a multiple of the workgroup size
-            then this function will call the shader with global ids outside of the input buffer
-            because it is designed to never leave an element unprocessed ( if n_workgroups is None it will auto calculate enough workgroups such that there will be at least one shader invocation per element in the input )
-            so if you have 3 elements but a workgroup size of 256, well it still has to do *one* dispatch ( by default ) of a workgroup
-            which is 256 in size, so 256-3=253 of those workers in the workgroup will get a global
-            id that is out of bounds.
-   NOTE:    This function won't try to pad out your buffer for you, this is because *you* can do that yourself
-            by giving it an in_data with a len that is a multiple of workgroup_len.
-            And on top of that by not doing its own thing, it also allows for other solutions
-            like bounds checking in the shader.
-            So by not dealing with it it allows more flexibility to the user of this api,
-            in other words, it's a feature not a bug.
-   NOTE: If n_workgroups is None it will auto calculate enough workgroups such that there will be at least one shader invocation per element in the input
+   WARNING: This function will call the shader with global ids up to workgroup_len*n_workgroups, this means
+            it can and *will* call the shader with global ids outside the length of the input buffer if told to do so.
+   NOTE:    This function won't try to pad out your buffer for you, this is because *you* can do that yourself.
+   NOTE:    Total number of calls = number of workgroups * workgroup len
 */
 
-// TODO: In the future when optimizing if the serialization of the input is taking too long, consider changing the api so that the serailization is not necessary
 // TODO: Experiment with Features::MAPPABLE_PRIMARY_BUFFERS for extra performance
-pub async fn run_shader<T, U>(params: RunShaderParams<'_, T, U>) -> Option<()>
+
+pub async fn run_shader<U>(params: RunShaderParams<'_, U>) -> Option<()>
 where
-    T: Clone + IntoShaderBytes,
     U: FromShaderBytes,
 {
     assert!(!params.out_data.is_empty());
+    assert!(!params.in_data.get_data().is_empty());
     if params.workgroup_len == 0 {
         println!("Your workgroups must have a size of at least 1.");
         return None;
     }
-
-    let n_workgroups: usize = match params.n_workgroups {
-        None => div_round_up(params.in_data.len(), params.workgroup_len),
-        Some(value) => value.into(),
-    };
-
-    let mut serialised_input = vec![0; T::shader_bytes_size() * params.in_data.len()];
-    for (i, chnk) in serialised_input
-        .chunks_mut(T::shader_bytes_size())
-        .enumerate()
-    {
-        params.in_data[i].to_shader_bytes(chnk);
-    }
+    let n_workgroups: usize = params.n_workgroups;
+    assert!(n_workgroups != 0);
 
     let in_buf = params
         .device
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Input compute data buffer"),
-            contents: &serialised_input,
+            contents: params.in_data.get_data(),
             usage: BufferUsages::STORAGE,
         });
 
@@ -121,10 +91,10 @@ where
 
     let mut metadata_var = [0u8; core::mem::size_of::<u32>()];
     let meta_buf = params.device.create_buffer(&BufferDescriptor {
-        size: metadata_var.len() as u64,
-        mapped_at_creation: false,
         label: Some("Metadata compute uniform buffer"),
+        size: metadata_var.len() as u64,
         usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
     });
 
     let bind_group_0_layout = params
@@ -273,10 +243,12 @@ where
         {
             params.out_data[i] = val;
         }
-        return Some(());
+        transfer_buf.unmap();
+        Some(())
+    } else {
+        transfer_buf.unmap();
+        None
     }
-
-    None
 }
 
 #[cfg(test)]
@@ -351,13 +323,13 @@ mod tests {
             .collect::<Vec<_>>();
 
         let mut res = vec![0u32; n_elem];
-        run_shader::<u32, u32>(RunShaderParams {
+        run_shader::<u32>(RunShaderParams {
             device: &device,
             queue: &queue,
-            in_data: &input_data,
+            in_data: ShaderBytes::serialise_from_slice(&input_data),
             out_data: &mut res,
             workgroup_len: 32,
-            n_workgroups: None,
+            n_workgroups: usize::div_ceil(input_data.len(), 32),
             program: &cs_module,
             entry_point: "main",
         })

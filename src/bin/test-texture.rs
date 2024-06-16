@@ -9,6 +9,7 @@ use wgpu::{
 
 #[tokio::main]
 async fn main() {
+    env_logger::init();
     let instance = wgpu::Instance::new(InstanceDescriptor::default());
 
     let adapter = instance

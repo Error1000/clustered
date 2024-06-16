@@ -1,18 +1,17 @@
 use std::{borrow::Cow, time::Instant};
 
-use clustered::RunShaderParams;
+use clustered::{shader_bytes::ShaderBytes, RunShaderParams};
 use futures::future::join_all;
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use rayon::join;
-use tokio::join;
 use wgpu::{
-    DeviceDescriptor, Features, InstanceDescriptor, InstanceFlags, Limits, RequestAdapterOptions,
+    DeviceDescriptor, Features, InstanceDescriptor, Limits, RequestAdapterOptions,
     ShaderModuleDescriptor,
 };
 
 #[tokio::main]
 async fn main() {
-    const sh: &str = r#"
+    env_logger::init();
+    const SHDR: &str = r#"
     @group(0)
     @binding(0)
     var<storage, read> v_in_data: array<u32>;
@@ -43,7 +42,7 @@ async fn main() {
     let adapter = instance
         .request_adapter(&RequestAdapterOptions {
             force_fallback_adapter: false,
-            power_preference: wgpu::PowerPreference::LowPower,
+            power_preference: wgpu::PowerPreference::HighPerformance,
             ..Default::default()
         })
         .await
@@ -63,7 +62,7 @@ async fn main() {
         .unwrap();
     let sh_module = device.create_shader_module(ShaderModuleDescriptor {
         label: None,
-        source: wgpu::ShaderSource::Wgsl(Cow::from(sh)),
+        source: wgpu::ShaderSource::Wgsl(Cow::from(SHDR)),
     });
 
     let mut futures: Vec<_> = Vec::new();
@@ -72,15 +71,15 @@ async fn main() {
         let fut = async {
             let mut rng = StdRng::seed_from_u64(4);
             let mut outv = vec![0; 128 * 1024];
-            let mut inv = Vec::new();
+            let mut inv = Vec::<u32>::new();
             inv.resize_with(outv.len(), || rng.gen_range(0..=1000));
-            clustered::run_shader::<u32, u32>(RunShaderParams {
+            clustered::run_shader::<u32>(RunShaderParams {
                 device: &device,
                 queue: &queue,
-                in_data: &inv,
+                in_data: ShaderBytes::serialise_from_slice(&inv),
                 out_data: &mut outv,
                 workgroup_len: 32,
-                n_workgroups: None,
+                n_workgroups: usize::div_ceil(inv.len(), 32),
                 program: &sh_module,
                 entry_point: "main",
             })
@@ -100,15 +99,15 @@ async fn main() {
         let fut = async {
             let mut rng = StdRng::seed_from_u64(4);
             let mut outv = vec![0; 128 * 1024];
-            let mut inv = Vec::new();
+            let mut inv = Vec::<u32>::new();
             inv.resize_with(outv.len(), || rng.gen_range(0..=1000));
-            clustered::run_shader::<u32, u32>(RunShaderParams {
+            clustered::run_shader::<u32>(RunShaderParams {
                 device: &device,
                 queue: &queue,
-                in_data: &inv,
+                in_data: ShaderBytes::serialise_from_slice(&inv),
                 out_data: &mut outv,
                 workgroup_len: 32,
-                n_workgroups: None,
+                n_workgroups: usize::div_ceil(inv.len(), 32),
                 program: &sh_module,
                 entry_point: "main",
             })

@@ -1,6 +1,6 @@
 use std::{borrow::Cow, fs::OpenOptions, io::Read, time::Instant};
 
-use clustered::RunShaderParams;
+use clustered::{shader_bytes::ShaderBytes, RunShaderParams};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use wgpu::{
     Backends, DeviceDescriptor, Features, InstanceDescriptor, InstanceFlags, Limits,
@@ -9,6 +9,7 @@ use wgpu::{
 
 #[tokio::main]
 async fn main() {
+    env_logger::init();
     let instance = wgpu::Instance::new(InstanceDescriptor {
         backends: Backends::all(),
         flags: InstanceFlags::empty(),
@@ -68,13 +69,13 @@ async fn main() {
             .collect::<Vec<_>>();
 
         let before_gpu = Instant::now();
-        clustered::run_shader::<f32, f32>(RunShaderParams {
+        clustered::run_shader::<f32>(RunShaderParams {
             device: &device,
             queue: &queue,
-            in_data: &input_data,
+            in_data: ShaderBytes::serialise_from_slice(&input_data),
             out_data: &mut res,
             workgroup_len: 32,
-            n_workgroups: None,
+            n_workgroups: usize::div_ceil(input_data.len(), 32),
             program: &cs_module,
             entry_point: "main",
         })

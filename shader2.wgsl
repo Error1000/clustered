@@ -4,12 +4,10 @@ var v_in_data: texture_2d<f32>;
 @group(0) @binding(1)
 var v_out_data: texture_storage_2d<rgba8unorm, write>;
 
-const wsize = vec3<u32>(1, 1, 1);
-
 
 // Gaussian blur
 @compute
-@workgroup_size(wsize.x, wsize.y, wsize.z)
+@workgroup_size(1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var conv_kern: array<array<f32, 5>, 5> = array<array<f32, 5>, 5>(
     array<f32, 5>(1.0/273.0, 4.0/273.0, 7.0/273.0, 4.0/273.0, 1.0/273.0),
@@ -32,11 +30,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         for(var dy: i32 = -2; dy <= 2; dy++){
             let pos_kern = vec2<i32>(2+dx, 2+dy);
             let pos_img = vec2<i32>(dx+i32(gid.x), dy+i32(gid.y));
-            var img_val: vec4<f32> = vec4<f32>(0, 0, 0, 0);
+            var img_val: vec4<f32> = vec4<f32>(0, 0, 0, 0); // Pad with zero in case we go outside the image
             if !(gid.x < 2 || gid.y < 2 || gid.x > width-2 || gid.y > height-2) { 
                 img_val = textureLoad(v_in_data, vec2(pos_img.x, pos_img.y), 0);
             }
-            if(img_val.w == 0.0){
+            if(img_val.w == 0.0){ // Fully transparent colors get mapped to transparent black
                 img_val = vec4<f32>(0, 0, 0, 0);
             }
             let kern_val: f32 = conv_kern[pos_kern.x][pos_kern.y];
