@@ -1,11 +1,12 @@
 use std::{borrow::Cow, time::Instant};
 
-use clustered::{shader_bytes::ShaderBytes, RunShaderParams};
+use clustered::{shader_bytes::ShaderBytes, wgpu_map_helper, RunShaderParams};
 use futures::future::join_all;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use wgpu::{
-    DeviceDescriptor, Features, InstanceDescriptor, Limits, RequestAdapterOptions,
-    ShaderModuleDescriptor,
+    util::{BufferInitDescriptor, DeviceExt},
+    BufferDescriptor, BufferUsages, CommandEncoderDescriptor, DeviceDescriptor, Features,
+    InstanceDescriptor, Limits, RequestAdapterOptions, ShaderModuleDescriptor,
 };
 
 #[tokio::main]
@@ -65,19 +66,35 @@ async fn main() {
         source: wgpu::ShaderSource::Wgsl(Cow::from(SHDR)),
     });
 
+    let n_elements = 128 * 1024;
     let mut futures: Vec<_> = Vec::new();
 
     for _ in 0..100 {
         let fut = async {
             let mut rng = StdRng::seed_from_u64(4);
-            let mut outv = vec![0; 128 * 1024];
+            let n_elem = 128 * 1024;
             let mut inv = Vec::<u32>::new();
-            inv.resize_with(outv.len(), || rng.gen_range(0..=1000));
-            clustered::run_shader::<u32>(RunShaderParams {
+            inv.resize_with(n_elem, || rng.gen_range(0..=1000));
+
+            let in_buf = device.create_buffer_init(&BufferInitDescriptor {
+                label: None,
+                contents: ShaderBytes::serialise_from_slice(&inv).get_data(),
+                usage: BufferUsages::STORAGE,
+            });
+
+            let mut out_buf = device.create_buffer(&BufferDescriptor {
+                label: None,
+                size: (n_elements * core::mem::size_of::<u32>())
+                    .try_into()
+                    .unwrap(),
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            clustered::run_shader(RunShaderParams {
                 device: &device,
                 queue: &queue,
-                in_data: ShaderBytes::serialise_from_slice(&inv),
-                out_data: &mut outv,
+                in_buf: &in_buf,
+                out_buf: &mut out_buf,
                 workgroup_len: 32,
                 n_workgroups: usize::div_ceil(inv.len(), 32),
                 program: &sh_module,
@@ -85,27 +102,60 @@ async fn main() {
             })
             .await
             .unwrap();
+            let transfer_buf = device.create_buffer(&BufferDescriptor {
+                label: None,
+                size: out_buf.size(),
+                usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+
+            let mut enc = device.create_command_encoder(&CommandEncoderDescriptor::default());
+            enc.copy_buffer_to_buffer(&out_buf, 0, &transfer_buf, 0, out_buf.size());
+            queue.submit([enc.finish()].into_iter());
+
+            let transfer_buf_view = transfer_buf.slice(..);
+            wgpu_map_helper(&device, wgpu::MapMode::Read, &transfer_buf_view)
+                .await
+                .unwrap();
+            let x = ShaderBytes::deserialise_to_slice(&transfer_buf_view.get_mapped_range())
+                .collect::<Vec<u32>>();
+            x
         };
         futures.push(fut);
     }
 
     let time_before_par = Instant::now();
-    join_all(futures).await;
+    let par_result = join_all(futures).await;
     let time_par = (Instant::now() - time_before_par).as_millis();
     println!("Parallel run_shader: {:?}ms", time_par);
 
+    let mut seq_result = Vec::<Vec<u32>>::new();
     let time_before_seq = Instant::now();
     for _ in 0..100 {
         let fut = async {
             let mut rng = StdRng::seed_from_u64(4);
-            let mut outv = vec![0; 128 * 1024];
+            let n_elem = 128 * 1024;
             let mut inv = Vec::<u32>::new();
-            inv.resize_with(outv.len(), || rng.gen_range(0..=1000));
-            clustered::run_shader::<u32>(RunShaderParams {
+            inv.resize_with(n_elem, || rng.gen_range(0..=1000));
+            let in_buf = device.create_buffer_init(&BufferInitDescriptor {
+                label: None,
+                contents: ShaderBytes::serialise_from_slice(&inv).get_data(),
+                usage: BufferUsages::STORAGE,
+            });
+
+            let mut out_buf = device.create_buffer(&BufferDescriptor {
+                label: None,
+                size: (n_elements * core::mem::size_of::<u32>())
+                    .try_into()
+                    .unwrap(),
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            clustered::run_shader(RunShaderParams {
                 device: &device,
                 queue: &queue,
-                in_data: ShaderBytes::serialise_from_slice(&inv),
-                out_data: &mut outv,
+                in_buf: &in_buf,
+                out_buf: &mut out_buf,
                 workgroup_len: 32,
                 n_workgroups: usize::div_ceil(inv.len(), 32),
                 program: &sh_module,
@@ -113,10 +163,29 @@ async fn main() {
             })
             .await
             .unwrap();
+            let transfer_buf = device.create_buffer(&BufferDescriptor {
+                label: None,
+                size: out_buf.size(),
+                usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+
+            let mut enc = device.create_command_encoder(&CommandEncoderDescriptor::default());
+            enc.copy_buffer_to_buffer(&out_buf, 0, &transfer_buf, 0, out_buf.size());
+            queue.submit([enc.finish()].into_iter());
+
+            let transfer_buf_view = transfer_buf.slice(..);
+            wgpu_map_helper(&device, wgpu::MapMode::Read, &transfer_buf_view)
+                .await
+                .unwrap();
+            let x = ShaderBytes::deserialise_to_slice(&transfer_buf_view.get_mapped_range())
+                .collect::<Vec<u32>>();
+            x
         };
-        fut.await;
+        seq_result.push(fut.await);
     }
 
     let time_seq = (Instant::now() - time_before_seq).as_millis();
     println!("Sequential run_shader: {:?}ms", time_seq);
+    assert_eq!(seq_result, par_result);
 }

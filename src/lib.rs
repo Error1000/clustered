@@ -1,15 +1,15 @@
-use shader_bytes::{FromShaderBytes, IntoShaderBytes, ShaderBytes};
+use shader_bytes::IntoShaderBytes;
 use tokio::task::yield_now;
 use wgpu::{
-    util::DeviceExt, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntry, BufferDescriptor, BufferSlice, BufferUsages, CommandEncoderDescriptor,
-    ComputePassDescriptor, ComputePipelineDescriptor, Device, PipelineLayoutDescriptor, Queue,
-    ShaderModule, ShaderStages,
+    BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
+    BufferDescriptor, BufferSlice, BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor,
+    ComputePipelineDescriptor, Device, PipelineLayoutDescriptor, Queue, ShaderModule, ShaderStages,
 };
 
 pub mod shader_bytes;
 
-async fn wgpu_map_helper(
+// NOTE: Device is used only for polling
+pub async fn wgpu_map_helper(
     device: &wgpu::Device,
     mode: wgpu::MapMode,
     buf_view: &BufferSlice<'_>,
@@ -29,11 +29,11 @@ async fn wgpu_map_helper(
         .expect("Channel should not error out when mapping!")
 }
 
-pub struct RunShaderParams<'a, U> {
+pub struct RunShaderParams<'a> {
     pub device: &'a Device,
     pub queue: &'a Queue,
-    pub in_data: ShaderBytes<'a>,
-    pub out_data: &'a mut [U],
+    pub in_buf: &'a wgpu::Buffer,
+    pub out_buf: &'a mut wgpu::Buffer,
     pub workgroup_len: usize,
     pub n_workgroups: usize,
     pub program: &'a ShaderModule,
@@ -59,35 +59,15 @@ pub struct RunShaderParams<'a, U> {
 
 // TODO: Experiment with Features::MAPPABLE_PRIMARY_BUFFERS for extra performance
 
-pub async fn run_shader<U>(params: RunShaderParams<'_, U>) -> Option<()>
-where
-    U: FromShaderBytes,
-{
-    assert!(!params.out_data.is_empty());
-    assert!(!params.in_data.get_data().is_empty());
+pub async fn run_shader(params: RunShaderParams<'_>) -> Option<()> {
+    assert!(params.out_buf.size() != 0);
+    assert!(params.in_buf.size() != 0);
     if params.workgroup_len == 0 {
         println!("Your workgroups must have a size of at least 1.");
         return None;
     }
     let n_workgroups: usize = params.n_workgroups;
     assert!(n_workgroups != 0);
-
-    let in_buf = params
-        .device
-        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Input compute data buffer"),
-            contents: params.in_data.get_data(),
-            usage: BufferUsages::STORAGE,
-        });
-
-    let out_buf = params.device.create_buffer(&BufferDescriptor {
-        label: Some("Output compute data buffer"),
-        size: (params.out_data.len() * U::shader_bytes_size())
-            .try_into()
-            .unwrap(),
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
 
     let mut metadata_var = [0u8; core::mem::size_of::<u32>()];
     let meta_buf = params.device.create_buffer(&BufferDescriptor {
@@ -109,7 +89,7 @@ where
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
-                        min_binding_size: Some(in_buf.size().try_into().unwrap()),
+                        min_binding_size: Some(params.in_buf.size().try_into().unwrap()),
                     },
                 },
                 BindGroupLayoutEntry {
@@ -119,7 +99,7 @@ where
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
-                        min_binding_size: Some(out_buf.size().try_into().unwrap()),
+                        min_binding_size: Some(params.out_buf.size().try_into().unwrap()),
                     },
                 },
                 BindGroupLayoutEntry {
@@ -159,24 +139,17 @@ where
         entries: &[
             BindGroupEntry {
                 binding: 0,
-                resource: in_buf.as_entire_binding(),
+                resource: params.in_buf.as_entire_binding(),
             },
             BindGroupEntry {
                 binding: 1,
-                resource: out_buf.as_entire_binding(),
+                resource: params.out_buf.as_entire_binding(),
             },
             BindGroupEntry {
                 binding: 2,
                 resource: meta_buf.as_entire_binding(),
             },
         ],
-    });
-
-    let transfer_buf = params.device.create_buffer(&BufferDescriptor {
-        label: Some("Intermediary buffer"),
-        size: out_buf.size(),
-        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-        mapped_at_creation: false,
     });
 
     let dispatch_workgroups = |how_many| {
@@ -204,6 +177,7 @@ where
         .unwrap();
 
     let remaining_workgroups = n_workgroups % max_dispatch_workgroups;
+
     // We try to dispatch as many workgroups per pass as possible and deal with the remainder afterwards
     for workgroup_id in (0..n_workgroups - remaining_workgroups).step_by(max_dispatch_workgroups) {
         // Tell the compute shader its absolute offset ( in elements )
@@ -226,29 +200,7 @@ where
         dispatch_workgroups(u32::try_from(remaining_workgroups).unwrap());
     }
 
-    // Transfer data
-    let mut final_encoder = params
-        .device
-        .create_command_encoder(&CommandEncoderDescriptor { label: None });
-    final_encoder.copy_buffer_to_buffer(&out_buf, 0, &transfer_buf, 0, out_buf.size());
-    params.queue.submit(Some(final_encoder.finish()));
-
-    let transfer_buf_view = transfer_buf.slice(..);
-    if let Ok(()) = wgpu_map_helper(params.device, wgpu::MapMode::Read, &transfer_buf_view).await {
-        for (i, val) in transfer_buf_view
-            .get_mapped_range()
-            .chunks_exact(U::shader_bytes_size())
-            .map(|raw_bytes| U::from_shader_bytes(raw_bytes))
-            .enumerate()
-        {
-            params.out_data[i] = val;
-        }
-        transfer_buf.unmap();
-        Some(())
-    } else {
-        transfer_buf.unmap();
-        None
-    }
+    Some(())
 }
 
 #[cfg(test)]
@@ -256,7 +208,9 @@ mod tests {
     use std::borrow::Cow;
 
     use rand::{rngs::StdRng, Rng, SeedableRng};
+    use shader_bytes::ShaderBytes;
     use wgpu::{
+        util::{BufferInitDescriptor, DeviceExt},
         DeviceDescriptor, Features, InstanceDescriptor, Limits, RequestAdapterOptions,
         ShaderModuleDescriptor,
     };
@@ -322,12 +276,24 @@ mod tests {
             .map(|_| rng.gen_range(0u32..=1000u32))
             .collect::<Vec<_>>();
 
-        let mut res = vec![0u32; n_elem];
+        let mut out_buf = device.create_buffer(&BufferDescriptor {
+            label: None,
+            size: (n_elem * core::mem::size_of::<u32>()).try_into().unwrap(),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let in_buf = device.create_buffer_init(&BufferInitDescriptor {
+            label: None,
+            contents: &ShaderBytes::serialise_from_slice(&input_data).into_data(),
+            usage: BufferUsages::STORAGE,
+        });
+
         run_shader::<u32>(RunShaderParams {
             device: &device,
             queue: &queue,
-            in_data: ShaderBytes::serialise_from_slice(&input_data),
-            out_data: &mut res,
+            in_buf: &in_buf,
+            out_buf: &mut out_buf,
             workgroup_len: 32,
             n_workgroups: usize::div_ceil(input_data.len(), 32),
             program: &cs_module,
@@ -335,6 +301,25 @@ mod tests {
         })
         .await
         .unwrap();
+
+        let transfer_buf = device.create_buffer(&BufferDescriptor {
+            label: None,
+            mapped_at_creation: false,
+            size: out_buf.size(),
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        });
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
+        encoder.copy_buffer_to_buffer(&out_buf, 0, &transfer_buf, 0, out_buf.size());
+        queue.submit([encoder.finish()].into_iter());
+
+        let transfer_buf_view = transfer_buf.slice(..);
+        wgpu_map_helper(&device, wgpu::MapMode::Read, &transfer_buf_view)
+            .await
+            .unwrap();
+        let res: Vec<u32> =
+            ShaderBytes::deserialise_to_slice(&transfer_buf_view.get_mapped_range());
+        drop(transfer_buf);
 
         // Cleanup resources on the gpu side
         device.poll(wgpu::Maintain::wait()).panic_on_timeout();

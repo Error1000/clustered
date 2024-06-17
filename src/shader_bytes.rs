@@ -1,5 +1,7 @@
 use std::borrow::Cow;
 
+use flume::Iter;
+
 pub trait ShaderBytesInfo {
     // NOTE: By *not* taking a self we explicitly disallow dynamically sized types and unsized types
     // Because working with consistently sized types is overall better (opinion)
@@ -102,9 +104,13 @@ pub struct ShaderBytes<'a> {
     inner: Cow<'a, [u8]>,
 }
 
-impl ShaderBytes<'_> {
+impl<'a> ShaderBytes<'a> {
     pub fn get_data(&self) -> &[u8] {
         &self.inner
+    }
+
+    pub fn into_data(self) -> Cow<'a, [u8]> {
+        self.inner
     }
 
     /// # Safety
@@ -130,5 +136,15 @@ impl ShaderBytes<'_> {
         ShaderBytes {
             inner: Cow::from(serialised),
         }
+    }
+
+    pub fn deserialise_to_slice<T>(data: &[u8]) -> impl Iterator<Item = T> + '_
+    where
+        T: FromShaderBytes,
+    {
+        let stride: usize =
+            usize::next_multiple_of(T::shader_bytes_size(), T::shader_bytes_align());
+        data.chunks_exact(stride)
+            .map(|raw_bytes| T::from_shader_bytes(raw_bytes))
     }
 }

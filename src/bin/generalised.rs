@@ -1,10 +1,10 @@
 use std::{borrow::Cow, fs::OpenOptions, io::Read, time::Instant};
 
-use clustered::{shader_bytes::ShaderBytes, RunShaderParams};
+use clustered::{shader_bytes::ShaderBytes, wgpu_map_helper, RunShaderParams};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use wgpu::{
-    Backends, DeviceDescriptor, Features, InstanceDescriptor, InstanceFlags, Limits,
-    RequestAdapterOptions, ShaderModuleDescriptor,
+    Backends, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, DeviceDescriptor, Features,
+    InstanceDescriptor, InstanceFlags, Limits, RequestAdapterOptions, ShaderModuleDescriptor,
 };
 
 #[tokio::main]
@@ -58,7 +58,20 @@ async fn main() {
 
     let n_elem = 128 * 1024 * 1024 / 4;
     let n_iter = 100;
-    let mut res = vec![0.0; n_elem];
+    let in_buf = device.create_buffer(&BufferDescriptor {
+        label: None,
+        size: (n_elem * f32::shader_bytes_size()).try_into().unwrap(),
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    use clustered::shader_bytes::ShaderBytesInfo;
+    let mut out_buf = device.create_buffer(&BufferDescriptor {
+        label: None,
+        size: (n_elem * f32::shader_bytes_size()).try_into().unwrap(),
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+
     #[allow(unused_assignments)]
     let mut res2: Vec<f32> = Vec::new();
     use rayon::prelude::*;
@@ -69,11 +82,17 @@ async fn main() {
             .collect::<Vec<_>>();
 
         let before_gpu = Instant::now();
-        clustered::run_shader::<f32>(RunShaderParams {
+        queue.write_buffer(
+            &in_buf,
+            0,
+            ShaderBytes::serialise_from_slice(&input_data).get_data(),
+        );
+
+        clustered::run_shader(RunShaderParams {
             device: &device,
             queue: &queue,
-            in_data: ShaderBytes::serialise_from_slice(&input_data),
-            out_data: &mut res,
+            in_buf: &in_buf,
+            out_buf: &mut out_buf,
             workgroup_len: 32,
             n_workgroups: usize::div_ceil(input_data.len(), 32),
             program: &cs_module,
@@ -81,7 +100,25 @@ async fn main() {
         })
         .await
         .unwrap();
+
+        let transfer_buf = device.create_buffer(&BufferDescriptor {
+            label: None,
+            size: out_buf.size(),
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
+        encoder.copy_buffer_to_buffer(&out_buf, 0, &transfer_buf, 0, out_buf.size());
+        queue.submit([encoder.finish()].into_iter());
+
+        let transfer_buf_view = transfer_buf.slice(..);
+        wgpu_map_helper(&device, wgpu::MapMode::Read, &transfer_buf_view)
+            .await
+            .unwrap();
+        let res: Vec<f32> =
+            ShaderBytes::deserialise_to_slice(&transfer_buf_view.get_mapped_range()).collect();
         let gpu_time = (Instant::now() - before_gpu).as_millis();
+
         data_total[0] += gpu_time;
         if gpu_time < data_min[0] {
             data_min[0] = gpu_time;
