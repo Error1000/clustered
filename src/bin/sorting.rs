@@ -55,8 +55,9 @@ async fn main() {
 
     impl Info<'_> {
         fn to_shader_bytes_custom(&self) -> Vec<u8> {
-            let mut res =
-                Vec::with_capacity(std::mem::size_of_val(self.data) + core::mem::size_of::<u32>());
+            let mut res = Vec::with_capacity(
+                std::mem::size_of_val(self.data) + core::mem::size_of::<u32>() * 2,
+            );
             res.extend_from_slice(&self.input_a_size.to_le_bytes());
             res.extend_from_slice(&self.input_b_size.to_le_bytes());
             for e in self.data {
@@ -127,7 +128,8 @@ async fn main() {
         .await
         .unwrap();
     let shader_output: Vec<u32> =
-        ShaderBytes::deserialise_to_slice::<u32>(&transfer_buf_view.get_mapped_range()).collect();
+        ShaderBytes::deserialise_to_iterator::<u32>(&transfer_buf_view.get_mapped_range())
+            .collect();
     let gpu_time = Instant::now() - gpu_before_time;
 
     use rayon::prelude::*;

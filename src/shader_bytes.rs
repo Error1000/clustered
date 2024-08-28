@@ -1,7 +1,5 @@
 use std::borrow::Cow;
 
-use flume::Iter;
-
 pub trait ShaderBytesInfo {
     // NOTE: By *not* taking a self we explicitly disallow dynamically sized types and unsized types
     // Because working with consistently sized types is overall better (opinion)
@@ -138,7 +136,7 @@ impl<'a> ShaderBytes<'a> {
         }
     }
 
-    pub fn deserialise_to_slice<T>(data: &[u8]) -> impl Iterator<Item = T> + '_
+    pub fn deserialise_to_iterator<T>(data: &[u8]) -> impl Iterator<Item = T> + '_
     where
         T: FromShaderBytes,
     {

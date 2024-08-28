@@ -116,7 +116,7 @@ async fn main() {
             wgpu_map_helper(&device, wgpu::MapMode::Read, &transfer_buf_view)
                 .await
                 .unwrap();
-            let x = ShaderBytes::deserialise_to_slice(&transfer_buf_view.get_mapped_range())
+            let x = ShaderBytes::deserialise_to_iterator(&transfer_buf_view.get_mapped_range())
                 .collect::<Vec<u32>>();
             x
         };
@@ -176,7 +176,7 @@ async fn main() {
             wgpu_map_helper(&device, wgpu::MapMode::Read, &transfer_buf_view)
                 .await
                 .unwrap();
-            let x = ShaderBytes::deserialise_to_slice(&transfer_buf_view.get_mapped_range())
+            let x = ShaderBytes::deserialise_to_iterator(&transfer_buf_view.get_mapped_range())
                 .collect::<Vec<u32>>();
             x
         };
