@@ -100,7 +100,6 @@ async fn main() {
                 program: &sh_module,
                 entry_point: "main",
             })
-            .await
             .unwrap();
             let transfer_buf = device.create_buffer(&BufferDescriptor {
                 label: None,
@@ -161,7 +160,6 @@ async fn main() {
                 program: &sh_module,
                 entry_point: "main",
             })
-            .await
             .unwrap();
             let transfer_buf = device.create_buffer(&BufferDescriptor {
                 label: None,

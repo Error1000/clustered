@@ -59,7 +59,7 @@ pub struct RunShaderParams<'a> {
 
 // TODO: Experiment with Features::MAPPABLE_PRIMARY_BUFFERS for extra performance
 
-pub async fn run_shader(params: RunShaderParams<'_>) -> Option<()> {
+pub fn run_shader(params: RunShaderParams<'_>) -> Option<()> {
     assert!(params.out_buf.size() != 0);
     assert!(params.in_buf.size() != 0);
     if params.workgroup_len == 0 {

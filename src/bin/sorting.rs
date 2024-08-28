@@ -104,15 +104,13 @@ async fn main() {
             ),
             program: &cs_module,
             workgroup_len: 1,
-        })
-        .await;
+        });
         (a, b) = (b, a);
         subsize *= 2;
         if subsize >= to_sort.len().try_into().unwrap() {
             break;
         }
     }
-    let gpu_time = Instant::now() - gpu_before_time;
 
     let transfer_buf = device.create_buffer(&BufferDescriptor {
         label: None,
@@ -130,6 +128,7 @@ async fn main() {
         .unwrap();
     let shader_output: Vec<u32> =
         ShaderBytes::deserialise_to_slice::<u32>(&transfer_buf_view.get_mapped_range()).collect();
+    let gpu_time = Instant::now() - gpu_before_time;
 
     use rayon::prelude::*;
     let cpu_before_time = Instant::now();
