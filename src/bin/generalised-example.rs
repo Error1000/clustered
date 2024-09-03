@@ -41,7 +41,7 @@ async fn main() {
     OpenOptions::new()
         .read(true)
         .write(false)
-        .open("shader.wgsl")
+        .open("shader-test.wgsl")
         .unwrap()
         .read_to_string(&mut cs_source)
         .unwrap();

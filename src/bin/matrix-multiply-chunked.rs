@@ -30,8 +30,11 @@ impl<'a> InData<'a> {
     ) -> InData<'a> {
         assert!(left.ncols == right.nrows);
         assert!(output_matrix_order == 1 || output_matrix_order == 2);
-        let mut formatted_data =
-            Vec::<f32>::with_capacity(left.get_n_elems() + right.get_n_elems());
+        let mut formatted_data = Vec::<f32>::with_capacity(
+            (left.get_n_elems() + right.get_n_elems())
+                .try_into()
+                .unwrap(),
+        );
         formatted_data.extend(left.data.iter());
         formatted_data.extend(right.data.iter());
         InData {
@@ -64,8 +67,8 @@ async fn main() {
     let instance = wgpu::Instance::new(InstanceDescriptor::default());
     let adapter = instance
         .request_adapter(&RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            force_fallback_adapter: false,
+            power_preference: wgpu::PowerPreference::LowPower,
+            force_fallback_adapter: true,
             ..Default::default()
         })
         .await
@@ -86,7 +89,7 @@ async fn main() {
     OpenOptions::new()
         .read(true)
         .write(false)
-        .open("shader-matrix-mult-simple.wgsl")
+        .open("shader-matrix-mult-chunked.wgsl")
         .unwrap()
         .read_to_string(&mut cs_source)
         .unwrap();
@@ -95,11 +98,11 @@ async fn main() {
         source: wgpu::ShaderSource::Wgsl(Cow::from(cs_source)),
     });
 
-    // let mut buf = String::new();
-    // std::io::stdin().read_line(&mut buf).unwrap();
-    // let mut rng = StdRng::seed_from_u64(buf.trim().parse::<u64>().unwrap());
-    // drop(buf);
-    let mut rng = StdRng::from_entropy();
+    let mut buf = String::new();
+    std::io::stdin().read_line(&mut buf).unwrap();
+    let mut rng = StdRng::seed_from_u64(buf.trim().parse::<u64>().unwrap());
+    drop(buf);
+    // let mut rng = StdRng::from_entropy();
     let mut left_mat = RowMajorMatrix::new(4000, 4000);
     let mut right_mat = ColMajorMatrix::new(4000, 4000);
 
@@ -145,7 +148,8 @@ async fn main() {
         entry_point: "main",
         in_buf: &in_buf,
         out_buf: &mut out_buf,
-        n_workgroups: usize::div_ceil(usize::try_from(out_mat_ncols * out_mat_nrows).unwrap(), 32),
+        n_workgroups: usize::div_ceil(usize::try_from(out_mat_ncols * out_mat_nrows).unwrap(), 32)
+            * 32,
         workgroup_len: 32,
     });
 
