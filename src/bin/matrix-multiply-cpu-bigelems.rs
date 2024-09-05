@@ -4,22 +4,23 @@ mod matrix;
 use matrix::*;
 use std::array;
 use std::fmt::Debug;
+use std::iter::Sum;
 use std::ops::{self, Index, IndexMut};
 use std::time::Instant;
 
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
 #[derive(Clone, Default)]
-pub struct RowMajorMat4x4<T> {
-    data: [T; 4 * 4],
+struct RowMajorMat4x4<MatrixElem> {
+    data: [MatrixElem; 4 * 4],
 }
 
 #[derive(Clone, Default)]
-pub struct ColMajorMat4x4<T> {
-    data: [T; 4 * 4],
+struct ColMajorMat4x4<MatrixElem> {
+    data: [MatrixElem; 4 * 4],
 }
 
-impl<T> RowMajorMat4x4<T> {
+impl<MatrixElem> RowMajorMat4x4<MatrixElem> {
     fn nrows(&self) -> usize {
         4
     }
@@ -31,9 +32,10 @@ impl<T> RowMajorMat4x4<T> {
         index.0 * 4 + index.1
     }
 }
+
 matrix_impl!(RowMajorMat4x4);
 
-impl<T> ColMajorMat4x4<T> {
+impl<MatrixElem> ColMajorMat4x4<MatrixElem> {
     fn nrows(&self) -> usize {
         4
     }
@@ -56,16 +58,12 @@ macro_rules! calc_elem {
             + &(&$left[($i, 3)] * &$right[(3, $j)]);
     };
 }
-impl<T> ops::Mul<&RowMajorMat4x4<T>> for &RowMajorMat4x4<T>
-where
-    T: Clone + Default,
-    for<'a> &'a T: std::ops::Mul<&'a T, Output = T> + std::ops::Add<&'a T, Output = T>,
-{
-    type Output = RowMajorMat4x4<T>;
+impl ops::Mul<&RowMajorMat4x4<f32>> for &RowMajorMat4x4<f32> {
+    type Output = RowMajorMat4x4<f32>;
 
-    fn mul(self, rhs: &RowMajorMat4x4<T>) -> Self::Output {
+    fn mul(self, rhs: &RowMajorMat4x4<f32>) -> Self::Output {
         let mut res = RowMajorMat4x4 {
-            data: array::from_fn(|_| T::default()),
+            data: array::from_fn(|_| f32::default()),
         };
         calc_elem!(0, 0, res, self, rhs);
         calc_elem!(0, 1, res, self, rhs);
@@ -87,65 +85,71 @@ where
     }
 }
 
-impl<T> std::iter::Sum for RowMajorMat4x4<T>
-where
-    T: Clone + Default,
-    for<'a> &'a T: std::ops::Mul<&'a T, Output = T> + std::ops::Add<&'a T, Output = T>,
-{
+impl Sum for RowMajorMat4x4<f32> {
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
-        let mut res = RowMajorMat4x4 {
-            data: array::from_fn(|_| T::default()),
-        };
+        let mut res = RowMajorMat4x4 { data: [0f32; 16] };
         for e in iter {
             for i in 0..res.data.len() {
-                res.data[i] = &res.data[i] + &e.data[i];
+                res.data[i] += e.data[i];
             }
         }
         res
     }
 }
 
+// fn index_to_offset(&self, index: (usize, usize)) -> usize {
+//     assert!(index.0 < self.nrows() && index.1 < self.ncols());
+//     let matrix_row_size = self.ncols() / self.chunk_ncols();
+//     let bigelem_row_size = self.chunk_ncols();
+//     // Find big element index
+//     let big_elem_index = (
+//         index.0 / self.bigelem_nrows(),
+//         index.1 / self.bigelem_ncols(),
+//     );
+//     let big_elem_start_offset = (big_elem_index.0 * matrix_row_size + big_elem_index.1)
+//         * (self.bigelem_nrows() * self.bigelem_ncols());
+//     let sub_elem_index = (
+//         index.0 % self.bigelem_nrows(),
+//         index.1 % self.bigelem_ncols(),
+//     );
+//     let sub_elem_extra_offset = sub_elem_index.0 * bigelem_row_size + sub_elem_index.1;
+//     big_elem_start_offset + sub_elem_extra_offset
+// }
+
 #[allow(clippy::erasing_op, clippy::identity_op)]
-pub fn mult(
+fn mult(
     left: &RowMajorMatrix<RowMajorMat4x4<f32>>,
     right: &ColMajorMatrix<RowMajorMat4x4<f32>>,
 ) -> RowMajorMatrix<RowMajorMat4x4<f32>> {
-    const CHUNK_SIZE: u32 = 4;
+    const CHUNK_SIZE: usize = 4;
     assert!(left.ncols == right.nrows);
+    let inner_dim = left.ncols();
+
     use rayon::prelude::*;
     RowMajorMatrix {
         nrows: left.nrows,
         ncols: right.ncols,
-        data: (0..left.nrows)
+        data: (0..left.nrows())
             .into_par_iter()
             .flat_map(|i| {
-                (0..right.ncols).into_par_iter().map(move |j| {
+                (0..right.ncols()).into_par_iter().map(move |j| {
+                    // Inner loop
                     [
-                        (left.ncols / CHUNK_SIZE * 0..left.ncols / CHUNK_SIZE * 1),
-                        (left.ncols / CHUNK_SIZE * 1..left.ncols / CHUNK_SIZE * 2),
-                        (left.ncols / CHUNK_SIZE * 2..left.ncols / CHUNK_SIZE * 3),
-                        (left.ncols / CHUNK_SIZE * 3..left.ncols),
+                        (inner_dim / CHUNK_SIZE * 0..inner_dim / CHUNK_SIZE * 1),
+                        (inner_dim / CHUNK_SIZE * 1..inner_dim / CHUNK_SIZE * 2),
+                        (inner_dim / CHUNK_SIZE * 2..inner_dim / CHUNK_SIZE * 3),
+                        (inner_dim / CHUNK_SIZE * 3..inner_dim),
                     ]
                     .into_par_iter()
                     .map(|subrange| {
                         subrange
-                            .map(move |k| {
-                                let left = &left[(i.try_into().unwrap(), k.try_into().unwrap())];
-                                let right = &right[(k.try_into().unwrap(), j.try_into().unwrap())];
-                                left * right
-                            })
-                            .sum()
+                            .map(move |k| &left[(i, k)] * &right[(k, j)])
+                            .sum::<RowMajorMat4x4<f32>>()
                     })
                     .sum()
-
-                    // Old code, for future changes to do a/b diffing to make sure the new code stays faster after those future changes
-                    // (0..left.ncols)
-                    //     .map(move |k| {
-                    //         let left_elem = &left[(i.try_into().unwrap(), k.try_into().unwrap())];
-                    //         let right_elem = &right[(k.try_into().unwrap(), j.try_into().unwrap())];
-                    //         left_elem * right_elem
-                    //     })
-                    //     .sum()
+                    // (0..inner_dim)
+                    //     .map(move |k| &left[(i, k)] * &right[(k, j)])
+                    //     .sum::<RowMajorMat4x4<f32>>()
                 })
             })
             .collect(),
@@ -156,12 +160,11 @@ pub fn mult(
 async fn main() {
     println!("Using CPU!");
 
-    // let mut buf = String::new();
-    // std::io::stdin().read_line(&mut buf).unwrap();
-    // let mut rng = StdRng::seed_from_u64(buf.trim().parse::<u64>().unwrap());
-    // drop(buf);
-    let mut rng = StdRng::from_entropy();
-    let time_start = Instant::now();
+    let mut buf = String::new();
+    std::io::stdin().read_line(&mut buf).unwrap();
+    let mut rng = StdRng::seed_from_u64(buf.trim().parse::<u64>().unwrap());
+    drop(buf);
+    // let mut rng = StdRng::from_entropy();
     // 4000x4000 square matrix multiplication performance measurement (31/aug/2024): ~850 ms
     let mut left_mat = RowMajorMatrix::<RowMajorMat4x4<f32>>::new(4000 / 4, 4000 / 4);
     let mut right_mat = ColMajorMatrix::<RowMajorMat4x4<f32>>::new(4000 / 4, 4000 / 4);
@@ -177,31 +180,24 @@ async fn main() {
         }
     }
 
-    let out_mat_nrows = left_mat.nrows;
-    let out_mat_ncols = right_mat.ncols;
+    let out_mat_nrows = left_mat.nrows();
+    let out_mat_ncols = right_mat.ncols();
     assert!(left_mat.ncols == right_mat.nrows);
     println!(
         "Output will be {} cols x {} rows!",
         out_mat_ncols * 4,
         out_mat_nrows * 4
     );
-    let _res = mult(&left_mat, &right_mat);
-    let time_end = Instant::now();
 
-    println!("Took {} s", (time_end - time_start).as_secs_f64());
-    // for i in 0..out_mat_nrows * 4 {
-    //     for j in 0..out_mat_ncols * 4 {
-    //         print!(
-    //             "{:?} ",
-    //             res[(
-    //                 usize::try_from(i).unwrap() / 4,
-    //                 usize::try_from(j).unwrap() / 4
-    //             )][(
-    //                 usize::try_from(i).unwrap() % 4,
-    //                 usize::try_from(j).unwrap() % 4
-    //             )]
-    //         );
+    let time_start = Instant::now();
+    let res = mult(&left_mat, &right_mat);
+    let time_end = Instant::now();
+    // for i in 0..res.nrows() * 4 {
+    //     for j in 0..res.ncols() * 4 {
+    //         print!("{:?} ", res[(i / 4, j / 4)][(i % 4, j % 4)]);
     //     }
     //     println!();
     // }
+
+    println!("Took {} s", (time_end - time_start).as_secs_f64());
 }

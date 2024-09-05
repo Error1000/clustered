@@ -58,13 +58,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let output_nrows: u32 = in1.nrows;
 
     // Each shader invocation calculates one element of the output
-    let id_i = actual_id/output_ncols;
-    let id_j = actual_id%output_ncols;
+    // There are output_ncols elements in a row, i.e. the number of elemens in a row = the number of columns of the matrix
+    let id_i = actual_id/output_ncols; // row
+    let id_j = actual_id%output_ncols; // column
 
     var res = 0.0;
     for(var k = u32(0); k < in1.ncols; k++) {
-        let elem1 = in_data.matrix_data[in1.offset + get_row_major_offset(id_i, k, in1.ncols)]; // In the left matrix
-        let elem2 = in_data.matrix_data[in2.offset + get_col_major_offset(k, id_j, in2.nrows)]; // In the right matrix
+        let elem1_offset = in1.offset + get_row_major_offset(id_i, k, in1.ncols);
+        let elem2_offset = in2.offset + get_col_major_offset(k, id_j, in2.nrows);
+        let elem1 = in_data.matrix_data[elem1_start_offset]; // In the left matrix
+        let elem2 = in_data.matrix_data[elem2_start_offset]; // In the right matrix
         res += elem1*elem2;
     }
     

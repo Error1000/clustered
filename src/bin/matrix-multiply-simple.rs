@@ -24,8 +24,8 @@ struct InData<'a> {
 impl<'a> InData<'a> {
     // NOTE: Allocates a new area to copy the two matrices into one contiguous memory area which can be used for the shader buffer
     fn from(
-        left: RowMajorMatrix<f32>,
-        right: ColMajorMatrix<f32>,
+        left: &RowMajorMatrix<f32>,
+        right: &ColMajorMatrix<f32>,
         output_matrix_order: u32,
     ) -> InData<'a> {
         assert!(left.ncols == right.nrows);
@@ -86,7 +86,7 @@ async fn main() {
     OpenOptions::new()
         .read(true)
         .write(false)
-        .open("shader-matrix-mult-simple.wgsl")
+        .open("shader-matrix-mult-chunked.wgsl") // Note: can also use shader-matrix-mult-simple
         .unwrap()
         .read_to_string(&mut cs_source)
         .unwrap();
@@ -95,20 +95,24 @@ async fn main() {
         source: wgpu::ShaderSource::Wgsl(Cow::from(cs_source)),
     });
 
-    // let mut buf = String::new();
-    // std::io::stdin().read_line(&mut buf).unwrap();
-    // let mut rng = StdRng::seed_from_u64(buf.trim().parse::<u64>().unwrap());
-    // drop(buf);
-    let mut rng = StdRng::from_entropy();
+    let mut buf = String::new();
+    std::io::stdin().read_line(&mut buf).unwrap();
+    let mut rng = StdRng::seed_from_u64(buf.trim().parse::<u64>().unwrap());
+    drop(buf);
+    //let mut rng = StdRng::from_entropy();
     let mut left_mat = RowMajorMatrix::new(4000, 4000);
     let mut right_mat = ColMajorMatrix::new(4000, 4000);
 
-    for e in left_mat.data.iter_mut() {
-        *e = rng.gen();
+    for i in 0..left_mat.nrows() {
+        for j in 0..left_mat.ncols() {
+            left_mat[(i, j)] = rng.gen();
+        }
     }
 
-    for e in right_mat.data.iter_mut() {
-        *e = rng.gen();
+    for i in 0..right_mat.nrows() {
+        for j in 0..right_mat.ncols() {
+            right_mat[(i, j)] = rng.gen();
+        }
     }
 
     let out_matrix_type = 2;
@@ -120,7 +124,7 @@ async fn main() {
     );
     let time_start = Instant::now();
     assert!(left_mat.ncols == right_mat.nrows);
-    let in_data = InData::from(left_mat.clone(), right_mat.clone(), out_matrix_type);
+    let in_data = InData::from(&left_mat, &right_mat, out_matrix_type);
 
     let in_buf = device.create_buffer_init(&BufferInitDescriptor {
         contents: &in_data.into_shader_bytes(),
@@ -145,7 +149,8 @@ async fn main() {
         entry_point: "main",
         in_buf: &in_buf,
         out_buf: &mut out_buf,
-        n_workgroups: usize::div_ceil(usize::try_from(out_mat_ncols * out_mat_nrows).unwrap(), 32),
+        n_workgroups: usize::div_ceil(usize::try_from(out_mat_ncols * out_mat_nrows).unwrap(), 32)
+            * 32,
         workgroup_len: 32,
     });
 
@@ -175,15 +180,6 @@ async fn main() {
     };
     let time_end = Instant::now();
     assert!(res.data.len() == usize::try_from(out_mat_nrows * out_mat_ncols).unwrap());
-
+    // println!("{:?}", res);
     println!("Took {}s!", (time_end - time_start).as_secs_f64());
-    // for i in 0..out_mat_nrows {
-    //     for j in 0..out_mat_ncols {
-    //         print!(
-    //             "{:?} ",
-    //             (res[(i.try_into().unwrap(), j.try_into().unwrap())] * 100.0) / 100.0
-    //         );
-    //     }
-    //     println!();
-    // }
 }
