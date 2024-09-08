@@ -66,8 +66,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     for(var k = u32(0); k < in1.ncols; k++) {
         let elem1_offset = in1.offset + get_row_major_offset(id_i, k, in1.ncols);
         let elem2_offset = in2.offset + get_col_major_offset(k, id_j, in2.nrows);
-        let elem1 = in_data.matrix_data[elem1_start_offset]; // In the left matrix
-        let elem2 = in_data.matrix_data[elem2_start_offset]; // In the right matrix
+        let elem1 = in_data.matrix_data[elem1_offset]; // In the left matrix
+        let elem2 = in_data.matrix_data[elem2_offset]; // In the right matrix
         res += elem1*elem2;
     }
     

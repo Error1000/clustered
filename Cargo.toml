@@ -14,10 +14,10 @@ name="test-texture"
 [dependencies]
 env_logger = "0.11"
 log = "0.4"
-wgpu = { version = "0.20", features = ["spirv"] }
-tokio = {version = "1", features = ["full"] }
+wgpu = { version = "22.1", features = ["spirv"] }
+tokio = {version = "1.40", features = ["full"] }
 shaderc = "0.8"
-bytemuck = "1.15"
+bytemuck = "1.18"
 flume = "0.11"
 image = "0.25"
 rand = "0.8"

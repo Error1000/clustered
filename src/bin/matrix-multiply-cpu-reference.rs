@@ -52,8 +52,8 @@ async fn main() {
     let mut rng = StdRng::seed_from_u64(buf.trim().parse::<u64>().unwrap());
     drop(buf);
     // let mut rng = StdRng::from_entropy();
-    let mut left_mat = RowMajorMatrix::new(8, 8);
-    let mut right_mat = ColMajorMatrix::new(8, 8);
+    let mut left_mat = RowMajorMatrix::new(400, 400);
+    let mut right_mat = ColMajorMatrix::new(400, 400);
     for i in 0..left_mat.nrows() {
         for j in 0..left_mat.ncols() {
             left_mat[(i, j)] = rng.gen();
@@ -78,5 +78,5 @@ async fn main() {
     let res = mult(&left_mat, &right_mat);
     let time_end = Instant::now();
     println!("{:?}", res);
-    println!("Took {} s", (time_end - time_start).as_secs_f64());
+    // println!("Took {} s", (time_end - time_start).as_secs_f64());
 }

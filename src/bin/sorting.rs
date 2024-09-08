@@ -28,6 +28,7 @@ async fn main() {
                 required_features: Features::STORAGE_RESOURCE_BINDING_ARRAY
                     | Features::BUFFER_BINDING_ARRAY,
                 required_limits: Limits::default(),
+                ..Default::default()
             },
             None,
         )

@@ -4,7 +4,7 @@ use clustered::{shader_bytes::ShaderBytes, wgpu_map_helper, RunShaderParams};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use wgpu::{
     Backends, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, DeviceDescriptor, Features,
-    InstanceDescriptor, InstanceFlags, Limits, RequestAdapterOptions, ShaderModuleDescriptor,
+    InstanceDescriptor, InstanceFlags, RequestAdapterOptions, ShaderModuleDescriptor,
 };
 
 #[tokio::main]
@@ -28,10 +28,9 @@ async fn main() {
     let (device, queue) = adapter
         .request_device(
             &DeviceDescriptor {
-                label: None,
                 required_features: Features::BUFFER_BINDING_ARRAY
                     | Features::STORAGE_RESOURCE_BINDING_ARRAY,
-                required_limits: Limits::default(),
+                ..Default::default()
             },
             None,
         )

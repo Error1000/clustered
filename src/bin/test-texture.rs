@@ -24,6 +24,7 @@ async fn main() {
                 required_features: Features::BUFFER_BINDING_ARRAY
                     | Features::STORAGE_RESOURCE_BINDING_ARRAY,
                 required_limits: Default::default(),
+                ..Default::default()
             },
             None,
         )
@@ -122,6 +123,7 @@ async fn main() {
         module: &cs_module,
         layout: Some(&pipeline_layout),
         compilation_options: wgpu::PipelineCompilationOptions::default(),
+        cache: None,
     });
 
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {

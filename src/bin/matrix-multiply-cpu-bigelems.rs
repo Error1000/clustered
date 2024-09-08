@@ -160,11 +160,11 @@ fn mult(
 async fn main() {
     println!("Using CPU!");
 
-    let mut buf = String::new();
-    std::io::stdin().read_line(&mut buf).unwrap();
-    let mut rng = StdRng::seed_from_u64(buf.trim().parse::<u64>().unwrap());
-    drop(buf);
-    // let mut rng = StdRng::from_entropy();
+    // let mut buf = String::new();
+    // std::io::stdin().read_line(&mut buf).unwrap();
+    // let mut rng = StdRng::seed_from_u64(buf.trim().parse::<u64>().unwrap());
+    // drop(buf);
+    let mut rng = StdRng::from_entropy();
     // 4000x4000 square matrix multiplication performance measurement (31/aug/2024): ~850 ms
     let mut left_mat = RowMajorMatrix::<RowMajorMat4x4<f32>>::new(4000 / 4, 4000 / 4);
     let mut right_mat = ColMajorMatrix::<RowMajorMat4x4<f32>>::new(4000 / 4, 4000 / 4);

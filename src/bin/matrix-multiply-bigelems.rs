@@ -64,8 +64,8 @@ struct InData<'a> {
 impl<'a> InData<'a> {
     // NOTE: Allocates a new area to copy the two matrices into one contiguous memory area which can be used for the shader buffer
     fn from(
-        left: &RowMajorMatrix<ColMajorMat4x4<f32>>,
-        right: &ColMajorMatrix<ColMajorMat4x4<f32>>,
+        left: &ColMajorMatrix<ColMajorMat4x4<f32>>,
+        right: &RowMajorMatrix<ColMajorMat4x4<f32>>,
         output_matrix_order: u32,
     ) -> InData<'a> {
         assert!(left.ncols == right.nrows);
@@ -135,15 +135,15 @@ async fn main() {
         source: wgpu::ShaderSource::Wgsl(Cow::from(cs_source)),
     });
 
-    let mut buf = String::new();
-    std::io::stdin().read_line(&mut buf).unwrap();
-    let mut rng = StdRng::seed_from_u64(buf.trim().parse::<u64>().unwrap());
-    drop(buf);
-    //let mut rng = StdRng::from_entropy();
+    // let mut buf = String::new();
+    // std::io::stdin().read_line(&mut buf).unwrap();
+    // let mut rng = StdRng::seed_from_u64(buf.trim().parse::<u64>().unwrap());
+    // drop(buf);
+    let mut rng = StdRng::from_entropy();
 
     // According to the wgsl specs, section 16.1.2.14, matrix variables are column major
-    let mut left_mat = RowMajorMatrix::<ColMajorMat4x4<f32>>::new(4000 / 4, 4000 / 4);
-    let mut right_mat = ColMajorMatrix::<ColMajorMat4x4<f32>>::new(4000 / 4, 4000 / 4);
+    let mut left_mat = ColMajorMatrix::<ColMajorMat4x4<f32>>::new(4000 / 4, 4000 / 4);
+    let mut right_mat = RowMajorMatrix::<ColMajorMat4x4<f32>>::new(4000 / 4, 4000 / 4);
 
     for i in 0..left_mat.nrows() * 4 {
         for j in 0..left_mat.ncols() * 4 {
@@ -157,7 +157,7 @@ async fn main() {
         }
     }
 
-    let out_matrix_type = 2;
+    let out_matrix_type = 1;
     let out_mat_nrows = left_mat.nrows;
     let out_mat_ncols = right_mat.ncols;
     println!(
@@ -214,8 +214,8 @@ async fn main() {
         .await
         .unwrap();
 
-    assert!(out_matrix_type == 2);
-    let res = RowMajorMatrix::<ColMajorMat4x4<f32>> {
+    assert!(out_matrix_type == 1);
+    let res = ColMajorMatrix::<ColMajorMat4x4<f32>> {
         nrows: out_mat_nrows,
         ncols: out_mat_ncols,
         data: transfer_view
@@ -238,11 +238,11 @@ async fn main() {
     };
     let time_end = Instant::now();
     assert!(res.data.len() == usize::try_from(out_mat_nrows * out_mat_ncols).unwrap());
+    println!("Took {}s!", (time_end - time_start).as_secs_f64());
     // for i in 0..res.nrows() * 4 {
     //     for j in 0..res.ncols() * 4 {
     //         print!("{:?} ", res[(i / 4, j / 4)][(i % 4, j % 4)]);
     //     }
     //     println!();
     // }
-    println!("Took {}s!", (time_end - time_start).as_secs_f64());
 }

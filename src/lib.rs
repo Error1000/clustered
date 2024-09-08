@@ -131,6 +131,7 @@ pub fn run_shader(params: RunShaderParams<'_>) -> Option<()> {
             layout: Some(&compute_pipeline_layout),
             module: params.program,
             compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
         });
 
     let bind_group_0 = params.device.create_bind_group(&BindGroupDescriptor {
@@ -235,6 +236,7 @@ mod tests {
                     required_features: Features::BUFFER_BINDING_ARRAY
                         | Features::STORAGE_RESOURCE_BINDING_ARRAY,
                     required_limits: Limits::default(),
+                    memory_hints: wgpu::MemoryHints::default(),
                 },
                 None,
             )

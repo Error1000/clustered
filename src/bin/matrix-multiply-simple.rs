@@ -150,7 +150,7 @@ async fn main() {
         in_buf: &in_buf,
         out_buf: &mut out_buf,
         n_workgroups: usize::div_ceil(usize::try_from(out_mat_ncols * out_mat_nrows).unwrap(), 32)
-            * 32,
+            * 32, /* 32 chunks per element */
         workgroup_len: 32,
     });
 
