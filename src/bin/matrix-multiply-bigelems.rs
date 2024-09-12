@@ -1,18 +1,21 @@
 #[path = "../bin-utils/matrix.rs"]
 mod matrix;
 use matrix::*;
+use tokio::net::TcpStream;
 
 use std::{
-    borrow::Cow, fmt::Debug, fs::OpenOptions, io::Read, ops::Index, ops::IndexMut, time::Instant,
+    borrow::Cow,
+    fmt::Debug,
+    fs::OpenOptions,
+    io::{Read, Write},
+    net::{Ipv4Addr, SocketAddrV4},
+    ops::{Index, IndexMut},
+    str::FromStr,
+    time::Instant,
 };
 
-use clustered::{wgpu_map_helper, RunShaderParams};
+use clustered::serialisable_program::SerialisableProgram;
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use wgpu::{
-    util::{BufferInitDescriptor, DeviceExt},
-    BufferDescriptor, BufferUsages, CommandEncoderDescriptor, DeviceDescriptor, Features,
-    InstanceDescriptor, RequestAdapterOptions, ShaderModuleDescriptor,
-};
 
 #[derive(Clone, Default)]
 struct RowMajorMat4x4<MatrixElem> {
@@ -101,27 +104,6 @@ impl<'a> InData<'a> {
 
 #[tokio::main]
 async fn main() {
-    let instance = wgpu::Instance::new(InstanceDescriptor::default());
-    let adapter = instance
-        .request_adapter(&RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            force_fallback_adapter: false,
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    println!("Using: {:?}", adapter.get_info());
-    let (device, queue) = adapter
-        .request_device(
-            &DeviceDescriptor {
-                required_features: Features::STORAGE_RESOURCE_BINDING_ARRAY
-                    | Features::BUFFER_BINDING_ARRAY,
-                ..Default::default()
-            },
-            None,
-        )
-        .await
-        .unwrap();
     let mut cs_source = String::new();
     OpenOptions::new()
         .read(true)
@@ -130,10 +112,6 @@ async fn main() {
         .unwrap()
         .read_to_string(&mut cs_source)
         .unwrap();
-    let cs_module = device.create_shader_module(ShaderModuleDescriptor {
-        label: Some("Compute module"),
-        source: wgpu::ShaderSource::Wgsl(Cow::from(cs_source)),
-    });
 
     // let mut buf = String::new();
     // std::io::stdin().read_line(&mut buf).unwrap();
@@ -165,52 +143,48 @@ async fn main() {
         out_mat_ncols * 4,
         out_mat_nrows * 4
     );
+
+    print!("Please enter telefork server ip: ");
+    std::io::stdout().flush().unwrap();
+    let mut response = String::new();
+    std::io::stdin().read_line(&mut response).unwrap();
+    let mut telefork_server_stream = TcpStream::connect(SocketAddrV4::new(
+        Ipv4Addr::from_str(response.trim()).expect("Input should be valid ip address!"),
+        1337,
+    ))
+    .await
+    .unwrap();
+
     let time_start = Instant::now();
     assert!(left_mat.ncols == right_mat.nrows);
     let in_data = InData::from(&left_mat, &right_mat, out_matrix_type);
 
-    let in_buf = device.create_buffer_init(&BufferInitDescriptor {
-        contents: &in_data.into_shader_bytes(),
-        label: None,
-        usage: BufferUsages::STORAGE,
-    });
-
-    let mut out_buf = device.create_buffer(&BufferDescriptor {
-        label: None,
-        size: u64::try_from(
-            core::mem::size_of::<f32>()
-                * usize::try_from(out_mat_ncols * out_mat_nrows * 4 * 4).unwrap(),
-        )
-        .unwrap(),
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-
-    clustered::run_shader(RunShaderParams {
-        device: &device,
-        queue: &queue,
-        program: &cs_module,
-        entry_point: "main",
-        in_buf: &in_buf,
-        out_buf: &mut out_buf,
+    let program_capsule = SerialisableProgram {
+        in_data: in_data.into_shader_bytes(),
+        out_data_nbytes: core::mem::size_of::<f32>()
+            * usize::try_from(out_mat_ncols * out_mat_nrows * 4 * 4).unwrap(),
+        program: cs_source,
+        entry_point: "main".to_owned(),
         n_workgroups: usize::div_ceil(usize::try_from(out_mat_ncols * out_mat_nrows).unwrap(), 32),
-        workgroup_len: 32,
-    });
+        workgroup_size: 32,
+    };
+    let serialised_program = serde_json::to_string(&program_capsule).unwrap();
+    // let mut program_file = OpenOptions::new()
+    //     .create(true)
+    //     .truncate(true)
+    //     .write(true)
+    //     .open("program-capsule.json")
+    //     .unwrap();
+    // program_file
+    //     .write_all(serialised_program.as_bytes())
+    //     .unwrap();
+    // drop(program_file);
 
-    let transfer_buf = device.create_buffer(&BufferDescriptor {
-        label: None,
-        size: out_buf.size(),
-        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    assert!(out_buf.size() == transfer_buf.size());
+    clustered::networking::write_buf(&mut telefork_server_stream, serialised_program.as_bytes())
+        .await
+        .unwrap();
 
-    let mut enc = device.create_command_encoder(&CommandEncoderDescriptor { label: None });
-    enc.copy_buffer_to_buffer(&out_buf, 0, &transfer_buf, 0, out_buf.size());
-    queue.submit([enc.finish()].into_iter());
-
-    let transfer_view = transfer_buf.slice(..);
-    wgpu_map_helper(&device, wgpu::MapMode::Read, &transfer_view)
+    let raw_res = clustered::networking::read_buf(&mut telefork_server_stream)
         .await
         .unwrap();
 
@@ -218,8 +192,7 @@ async fn main() {
     let res = ColMajorMatrix::<ColMajorMat4x4<f32>> {
         nrows: out_mat_nrows,
         ncols: out_mat_ncols,
-        data: transfer_view
-            .get_mapped_range()
+        data: raw_res
             .chunks_exact(core::mem::size_of::<f32>() * 4 * 4)
             .map(|raw_elem| {
                 let mut res_elem = ColMajorMat4x4 {

@@ -6,6 +6,8 @@ use wgpu::{
     ComputePipelineDescriptor, Device, PipelineLayoutDescriptor, Queue, ShaderModule, ShaderStages,
 };
 
+pub mod networking;
+pub mod serialisable_program;
 pub mod shader_bytes;
 
 // NOTE: Device is used only for polling
@@ -41,18 +43,15 @@ pub struct RunShaderParams<'a> {
 }
 
 /* IDEA: This could maybe benefit from interning literally everything but the data
-   NOTE: Output slice length and input slice length are important and used to calculate the size of the shader input and output buffers
    NOTE: Assumes bind group 0 is used for the input and output
    NOTE: Assumes that the same buffer can't be used for input and output
          ^ These are not design choices, these can be changed if wanted
-   NOTE: The whole architecture assumes all Ts are of the same size when serialized and all Us are of the same size when serialized
-         ^ That one is a design choice, though it wouldn't be a bad idea to allow the serialization some kind of extra buffer to use to serialize that is also uploaded, like some kind of context
    WARNING: Because the input data is serialized for the shader to be able to read,
             type erasure effectively takes place, meaning unless you programmed the shader
             to read the data correctly it won't know what type the data is
             and can easily lead to accidental type punning
    WARNING: This function will call the shader with global ids up to workgroup_len*n_workgroups, this means
-            it can and *will* call the shader with global ids outside the length of the input buffer if told to do so.
+            it can and *will* call the shader with global ids outside the *length* of the input buffer if told to do so.
    NOTE:    This function won't try to pad out your buffer for you, this is because *you* can do that yourself.
    NOTE:    Total number of calls = number of workgroups * workgroup len
 */
@@ -177,11 +176,11 @@ pub fn run_shader(params: RunShaderParams<'_>) -> Option<()> {
         .try_into()
         .unwrap();
 
-    let remaining_workgroups = n_workgroups % max_dispatch_workgroups;
+    let remainder_workgroups = n_workgroups % max_dispatch_workgroups;
 
     // We try to dispatch as many workgroups per pass as possible and deal with the remainder afterwards
-    for workgroup_id in (0..n_workgroups - remaining_workgroups).step_by(max_dispatch_workgroups) {
-        // Tell the compute shader its absolute offset ( in elements )
+    for workgroup_id in (0..n_workgroups - remainder_workgroups).step_by(max_dispatch_workgroups) {
+        // Tell the compute shader its absolute offset
         // because the global offset is only global within the dispatch
         u32::to_shader_bytes(
             &u32::try_from(workgroup_id * params.workgroup_len).unwrap(),
@@ -192,13 +191,13 @@ pub fn run_shader(params: RunShaderParams<'_>) -> Option<()> {
     }
 
     // Deal with remainder
-    if remaining_workgroups != 0 {
+    if remainder_workgroups != 0 {
         u32::to_shader_bytes(
-            &u32::try_from((n_workgroups - remaining_workgroups) * params.workgroup_len).unwrap(),
+            &u32::try_from((n_workgroups - remainder_workgroups) * params.workgroup_len).unwrap(),
             &mut metadata_var,
         );
         params.queue.write_buffer(&meta_buf, 0, &metadata_var);
-        dispatch_workgroups(u32::try_from(remaining_workgroups).unwrap());
+        dispatch_workgroups(u32::try_from(remainder_workgroups).unwrap());
     }
 
     Some(())
