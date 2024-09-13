@@ -7,7 +7,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    net::TcpStream,
     sync::Mutex,
 };
 
@@ -40,40 +40,42 @@ async fn handle_peer(mut peer: TcpStream, peer_registry: Arc<Mutex<HashSet<PeerA
         return;
     }
 
-    let mut registry_lock = peer_registry.lock().await;
-    let mut peer2peer_port = 8008; // This port is used by other peers to connect to this peer
-                                   // Why not just use the same port for everybody? Because some peers may have the same ip address, so they can't both listen on the same port
-                                   // This is realistically only the case if the same computer has multiple peers running, but it is possible.
-                                   // So to avoid a collision this mechanism was created.
-    loop {
-        let is_unique =
-            registry_lock.insert(PeerAddr(SocketAddrV4::new(*peer_addr.ip(), peer2peer_port)));
-        if is_unique {
-            // Found good p2p port
-            break;
-        }
-        peer2peer_port = match peer2peer_port.checked_add(1) {
-            Some(val) => val,
-            None => {
-                println!("Notice: Couldn't find p2p port for this peer, there are too many other peers with the same (ip, p2p_port) pair!, how did you even do this?, giving up on {peer_addr:?}...");
-                return;
+    // This port is used by other peers to connect to this peer.
+    // Why not just use the same port for everybody? Because some peers may have the same ip address, so they can't both listen on the same port
+    // This is realistically only the case if the same computer has multiple peers running, but it is possible.
+    // So to avoid a collision this mechanism was created.
+    let mut peer2peer_port = 8008;
+
+    {
+        let mut registry_lock = peer_registry.lock().await;
+
+        // Try to insert peer into registry
+        loop {
+            let is_unique =
+                registry_lock.insert(PeerAddr(SocketAddrV4::new(*peer_addr.ip(), peer2peer_port)));
+            if is_unique {
+                // Found good p2p port
+                break;
+            }
+            peer2peer_port = match peer2peer_port.checked_add(1) {
+                Some(val) => val,
+                None => {
+                    println!("Notice: Couldn't find p2p port for this peer, there are too many other peers with the same (ip, p2p_port) pair!, how did you even do this?, giving up on {peer_addr:?}...");
+                    return;
+                }
             }
         }
-    }
 
-    // Send p2p port to it
-    if let Err(err) = peer.write_u16(peer2peer_port).await {
-        assert!(registry_lock.remove(&PeerAddr(SocketAddrV4::new(
-            *peer_addr.ip(),
-            peer2peer_port,
-        ))));
-        println!(
-            "Notice: Peer {peer_addr:?} connected but i can't communicate with it, giving up on it, error was: {err:?}"
-        );
-        return;
+        // Send p2p port to it
+        if let Err(err) = peer.write_u16(peer2peer_port).await {
+            assert!(registry_lock.remove(&PeerAddr(SocketAddrV4::new(
+                *peer_addr.ip(),
+                peer2peer_port,
+            ))));
+            println!("Notice: Peer {peer_addr:?} connected but i can't communicate with it, giving up on it, error was: {err}!");
+            return;
+        }
     }
-
-    drop(registry_lock);
 
     println!(
         "Info: New peer: {:?} with p2p port: {:?}!",
@@ -137,12 +139,13 @@ async fn handle_peer(mut peer: TcpStream, peer_registry: Arc<Mutex<HashSet<PeerA
     }
 
     // If we exit the loop that means the peer disconnected, so remove it before exiting
-    let mut registry_lock = peer_registry.lock().await;
-    registry_lock.remove(&PeerAddr(SocketAddrV4::new(
-        *peer_addr.ip(),
-        peer2peer_port,
-    )));
-    drop(registry_lock);
+    peer_registry
+        .lock()
+        .await
+        .remove(&PeerAddr(SocketAddrV4::new(
+            *peer_addr.ip(),
+            peer2peer_port,
+        )));
 
     println!(
         "Info: Peer {:?}, with p2p port: {:?}, disconnected!",
@@ -154,16 +157,11 @@ async fn handle_peer(mut peer: TcpStream, peer_registry: Arc<Mutex<HashSet<PeerA
 #[tokio::main]
 async fn main() {
     let peer_registry = Arc::new(Mutex::new(HashSet::<PeerAddr>::new()));
-    let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 1337))
-        .await
-        .unwrap();
     println!("Info: Tracker online, listening...");
-    loop {
-        match listener.accept().await {
-            Ok((peer_stream, _)) => {
-                tokio::spawn(handle_peer(peer_stream, peer_registry.clone()));
-            }
-            Err(e) => println!("Notice: Error accepting peer connection: {:?}", e),
-        }
-    }
+    clustered::networking::listen(
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 1337)),
+        handle_peer,
+        peer_registry,
+    )
+    .await;
 }

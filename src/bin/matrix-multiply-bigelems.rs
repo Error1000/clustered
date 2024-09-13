@@ -144,16 +144,10 @@ async fn main() {
         out_mat_nrows * 4
     );
 
-    print!("Please enter telefork server ip: ");
-    std::io::stdout().flush().unwrap();
-    let mut response = String::new();
-    std::io::stdin().read_line(&mut response).unwrap();
-    let mut telefork_server_stream = TcpStream::connect(SocketAddrV4::new(
-        Ipv4Addr::from_str(response.trim()).expect("Input should be valid ip address!"),
-        1337,
-    ))
-    .await
-    .unwrap();
+    let mut telefork_server_stream =
+        TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1337))
+            .await
+            .unwrap();
 
     let time_start = Instant::now();
     assert!(left_mat.ncols == right_mat.nrows);

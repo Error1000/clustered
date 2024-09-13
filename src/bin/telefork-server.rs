@@ -2,7 +2,7 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 
 use clustered::serialisable_program::SerialisableProgram;
 
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, time::Instant};
 use wgpu::{DeviceDescriptor, InstanceDescriptor, RequestAdapterOptions};
 
 #[tokio::main]
@@ -37,6 +37,7 @@ async fn main() {
         .unwrap();
     loop {
         let (mut connection, _) = listener.accept().await.unwrap();
+        println!("Connection from {:?} accepted!", connection.peer_addr());
         let program_capsule: SerialisableProgram = serde_json::from_slice(
             &clustered::networking::read_buf(&mut connection)
                 .await
@@ -44,7 +45,10 @@ async fn main() {
         )
         .unwrap();
         println!("Received and deserialised program!");
-        let res = program_capsule.run(&device, &queue).await;
+        let time_before = Instant::now();
+        let res = program_capsule.run(&device, &queue).await.unwrap();
+        let time_after = Instant::now();
+        println!("Took: {:?}s!", (time_after - time_before).as_secs_f32());
         println!("Sending result...");
         clustered::networking::write_buf(&mut connection, &res)
             .await

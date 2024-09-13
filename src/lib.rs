@@ -16,19 +16,32 @@ pub async fn wgpu_map_helper(
     mode: wgpu::MapMode,
     buf_view: &BufferSlice<'_>,
 ) -> Result<(), wgpu::BufferAsyncError> {
-    let (sender, reciver) = flume::bounded(1);
-    buf_view.map_async(mode, move |mapping_res| sender.send(mapping_res).unwrap());
+    let (sender, receiver) = flume::bounded(1);
+    buf_view.map_async(mode, move |mapping_res| {
+        tokio::spawn(async move {
+            if let Err(err) = mapping_res.clone() {
+                println!("Error: Mapping failed with error: {err}!");
+            }
+
+            if let Err(err) = sender.try_send(mapping_res) {
+                panic!(
+                    "Error: Failed to send mapping result over flume channel, error was: {err}!"
+                );
+            }
+        });
+    });
+
     loop {
-        let _ = device.poll(wgpu::MaintainBase::Poll);
+        device.poll(wgpu::MaintainBase::Poll).panic_on_timeout();
         yield_now().await;
-        if !reciver.is_empty() {
+        if !receiver.is_empty() {
             break;
         }
     }
-    reciver
+    receiver
         .recv_async()
         .await
-        .expect("Channel should not error out when mapping!")
+        .expect("Channel should not error out when receiving mapping result!")
 }
 
 pub struct RunShaderParams<'a> {

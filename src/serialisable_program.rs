@@ -8,7 +8,7 @@ use wgpu::{
 };
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SerialisableProgram {
     #[serde_as(as = "Base64")]
     pub in_data: Vec<u8>,
@@ -20,7 +20,7 @@ pub struct SerialisableProgram {
 }
 
 impl SerialisableProgram {
-    pub async fn run(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Vec<u8> {
+    pub async fn run(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Option<Vec<u8>> {
         let cm = device.create_shader_module(ShaderModuleDescriptor {
             label: None,
             source: wgpu::ShaderSource::Wgsl(Cow::from(&self.program)),
@@ -47,8 +47,7 @@ impl SerialisableProgram {
             n_workgroups: self.n_workgroups,
             program: &cm,
             entry_point: &self.entry_point,
-        })
-        .unwrap();
+        })?;
 
         let transfer_buf = device.create_buffer(&BufferDescriptor {
             label: None,
@@ -64,12 +63,12 @@ impl SerialisableProgram {
         let transfer_view = transfer_buf.slice(..);
         crate::wgpu_map_helper(device, wgpu::MapMode::Read, &transfer_view)
             .await
-            .unwrap();
+            .ok()?;
         let res = transfer_view
             .get_mapped_range()
             .iter()
             .copied()
             .collect::<Vec<u8>>();
-        res
+        Some(res)
     }
 }
