@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     io::{self, ErrorKind},
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     sync::Arc,
@@ -10,45 +11,172 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     fs::OpenOptions,
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-    sync::Mutex,
+    net::TcpStream,
+    sync::{Mutex, RwLock, Semaphore},
     time::{sleep, Instant},
 };
+use uuid::Uuid;
 use wgpu::{DeviceDescriptor, InstanceDescriptor, RequestAdapterOptions};
 
 const MAGIC_PEER2PEER_SEQUENCE: &str = "Clustered peer2peer, yay!";
 const MAGIC_TRACKER_SEQUENCE: &str = "Clustered tracker!";
 
+const MINIMUM_TASKS_BEFORE_START_STEALING_TRESH: usize = 5; // We won't steal if we have more than this number of tasks
+const NO_STEAL_TRESHOLD: usize = 1; // No stealing will be allowed if we have less than this number of tasks
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Task {
     return_addr: SocketAddrV4, // Where to return result
     program: SerialisableProgram,
+    id: u128,
 }
 
 type TaskQueueType = Arc<Mutex<Vec<Task>>>;
+type BufferRegistryType = Arc<RwLock<HashMap<Uuid, Vec<u8>>>>;
+type NotifierRegistryType = Arc<RwLock<HashMap<Uuid, Arc<Semaphore>>>>;
 
-async fn return_data(data: Vec<u8>, return_addr: SocketAddrV4) {
-    let mut connection = match TcpStream::connect(return_addr).await {
-        Ok(val) => val,
-        Err(err) => {
-            println!(
-                "Notice: Couldn't connect to peer {return_addr:?} to return data, error was: {err:?}!"
-            );
+async fn connect_to_other_peer(other_peer_addr: SocketAddr) -> io::Result<TcpStream> {
+    let mut other_peer_connection = TcpStream::connect(other_peer_addr).await.map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!("{err}\nWhile connecting to other peer: {other_peer_addr}"),
+        )
+    })?;
+
+    clustered::networking::write_buf(
+        &mut other_peer_connection,
+        MAGIC_PEER2PEER_SEQUENCE.as_bytes(),
+    )
+    .await
+    .map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!("{err}\nWhile sending magic sequence to other peer: {other_peer_addr}"),
+        )
+    })?;
+
+    Ok(other_peer_connection)
+}
+
+async fn connect_to_tracker(tracker_addr: SocketAddr) -> io::Result<(Ipv4Addr, u16, TcpStream)> {
+    let mut tracker_connection = TcpStream::connect(tracker_addr).await.map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!("{err}\nWhile connecting to tracker: {tracker_addr}"),
+        )
+    })?;
+
+    let tracker_magic = clustered::networking::read_buf(&mut tracker_connection)
+        .await
+        .map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!("{err}\nWhile receiving magic sequence from tracker: {tracker_addr}"),
+            )
+        })?;
+
+    if tracker_magic != MAGIC_TRACKER_SEQUENCE.as_bytes() {
+        return Err(io::Error::new(
+            ErrorKind::Other,
+            format!(
+                "Bad magic {:?} received from tracker: {tracker_addr}!",
+                String::from_utf8(tracker_magic)
+            ),
+        ));
+    }
+
+    let our_ip = Ipv4Addr::from_bits(tracker_connection.read_u32().await.map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!("{err}\nWhile receiving ip address from tracker: {tracker_addr}"),
+        )
+    })?);
+
+    let peer2peer_port = tracker_connection.read_u16().await.map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!("{err}\nWhile receiving p2p port from tracker: {tracker_addr}"),
+        )
+    })?;
+
+    Ok((our_ip, peer2peer_port, tracker_connection))
+}
+
+async fn return_data(
+    data: Vec<u8>,
+    return_addr: SocketAddrV4,
+    task_id: Uuid,
+    output_buffer_registry: BufferRegistryType,
+    notifier_registry: NotifierRegistryType,
+) {
+    // We could test if the return_addr is ourselves, but it's easier to just search for the uuid in our registry
+    // and if we have it then the return_addr is ourselves otherwise it's someone else and we need to connect to them.
+    let mut buf_registry_write_lock = output_buffer_registry.write().await;
+    if let Some(local_buf) = buf_registry_write_lock.get_mut(&task_id) {
+        *local_buf = data;
+        drop(buf_registry_write_lock);
+        if let Some(notifier) = notifier_registry.read().await.get(&task_id) {
+            notifier.add_permits(Semaphore::MAX_PERMITS);
+        }
+    } else {
+        drop(buf_registry_write_lock);
+        let mut other_peer_connection =
+            match connect_to_other_peer(SocketAddr::V4(return_addr)).await {
+                Ok(val) => val,
+                Err(err) => {
+                    if !clustered::networking::was_connection_severed(err.kind()) {
+                        println!("Error:");
+                        println!("{err}");
+                        println!("While returning data to other peer: {return_addr}");
+                    }
+                    return;
+                }
+            };
+
+        // Message id 2 is "return result" for peers
+        if let Err(err) = other_peer_connection.write_u8(2).await {
+            println!("Error: {err}");
+            println!("While sending message id to other peer: {return_addr}");
+            println!("While returning data to other peer: {return_addr}");
+            return;
+        };
+
+        if let Err(err) = other_peer_connection.write_u128(task_id.as_u128()).await {
+            println!("Error: {err}");
+            println!("While sending task uuid to other peer: {return_addr}");
+            println!("While returning data to other peer: {return_addr}");
             return;
         }
-    };
-    if let Err(err) = clustered::networking::write_buf(&mut connection, &data).await {
-        println!("Notice: Couldn't send return data to peer {return_addr:?}, error was: {err:?}!");
+
+        if let Err(err) = clustered::networking::write_buf(&mut other_peer_connection, &data).await
+        {
+            println!("Error: {err}");
+            println!("While sending return data to other peer: {return_addr}");
+            println!("While returning data to other peer: {return_addr}");
+        }
     }
 }
 
-async fn consume_task(task: Task, device: &wgpu::Device, queue: &wgpu::Queue) {
+async fn consume_task(
+    task: Task,
+    output_buffer_registry: BufferRegistryType,
+    notifier_registry: NotifierRegistryType,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) {
     println!("Info: Consuming task!");
+    let task_uuid = Uuid::from_u128(task.id);
     let Some(result) = task.program.run(device, queue).await else {
         println!("Error: Failed to run task, discarding it!");
         return;
     };
-    tokio::spawn(return_data(result, task.return_addr));
+    tokio::spawn(return_data(
+        result,
+        task.return_addr,
+        task_uuid,
+        output_buffer_registry,
+        notifier_registry,
+    ));
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -65,7 +193,9 @@ async fn steal_task(
         tracker_connection_lock.write_u8(1).await.map_err(|err| {
             io::Error::new(
                 err.kind(),
-                format!("Error: Couldn't send message id to tracker, error was: {err}!"),
+                format!(
+                    "{err}\nWhile sending message id to tracker\nWhile attempting to steal tasks"
+                ),
             )
         })?;
 
@@ -74,12 +204,12 @@ async fn steal_task(
             .map_err(|err| {
                 io::Error::new(
                     err.kind(),
-                    format!("Error: Couldn't receive peer list from tracker, error was: {err}!"),
+                    format!("{err}\nWhile receiving peer list from tracker\nWhile attempting to steal tasks"),
                 )
             })?;
 
         serde_json::from_slice::<Vec<PeerAddr>>(&raw_peer_list)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, format!("Error: Couldn't deserialise peer list received from tracker, error was: {err:?}!")))?
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, format!("{err}\nWhile deserialising peer list received from tracker\nWhile attempting to steal tasks")))?
     };
 
     if peer_list.is_empty() {
@@ -88,65 +218,87 @@ async fn steal_task(
     }
 
     for other_peer in peer_list {
-        let mut other_peer_connection = match TcpStream::connect(other_peer.0).await {
+        let mut other_peer_connection =
+            match connect_to_other_peer(SocketAddr::V4(other_peer.0)).await {
+                Ok(val) => val,
+                Err(err) => {
+                    // Connection refused might happen if the peer disconnects after we have gotten the peer list from the tracker
+                    // but before we try to connect
+                    if !clustered::networking::was_connection_severed(err.kind())
+                        && err.kind() != ErrorKind::ConnectionRefused
+                    {
+                        println!("Notice:");
+                        println!("{err}");
+                        println!(
+                            "While attempting to steal task from other peer: {:?}",
+                            other_peer.0
+                        );
+                    }
+                    continue;
+                }
+            };
+
+        // Message id 1 is "steal task" for peers
+        if let Err(err) = other_peer_connection.write_u8(1).await {
+            if !clustered::networking::was_connection_severed(err.kind()) {
+                println!("Notice:");
+                println!("{err}");
+                println!("While sending message id to other peer: {:?}", other_peer.0);
+                println!(
+                    "While attempting to steal task from other peer: {:?}",
+                    other_peer.0
+                );
+            }
+            continue;
+        };
+
+        let raw_res = match clustered::networking::read_buf(&mut other_peer_connection).await {
             Ok(val) => val,
             Err(err) => {
-                if err.kind() == ErrorKind::ConnectionRefused {
-                    // Just assume that the client went offline in between us getting the peer list from the tracker and trying to connect to it
-                    // So no print just ignore
-                } else {
+                if !clustered::networking::was_connection_severed(err.kind()) {
+                    println!("Notice:");
+                    println!("{err}");
+                    println!("While receiveing task from other peer: {:?}", other_peer.0);
                     println!(
-                        "Notice: Couldn't establish connection to peer: {:?}, while looking to steal tasks, error was: {err}!",
+                        "While attempting to steal task from other peer: {:?}",
                         other_peer.0
-                );
+                    );
                 }
                 continue;
             }
         };
 
-        let Ok(_) = clustered::networking::write_buf(
-            &mut other_peer_connection,
-            MAGIC_PEER2PEER_SEQUENCE.as_bytes(),
-        )
-        .await
-        else {
-            println!(
-                "Notice: Couldn't send magic sequence to other peer: {:?}!",
-                other_peer.0
-            );
-            continue;
+        drop(other_peer_connection);
+
+        let res: Option<Task> = match serde_json::from_slice(&raw_res) {
+            Ok(val) => val,
+            Err(err) => {
+                println!("Notice:");
+                println!("{err}");
+                println!("While deserialising task received from other peer {other_peer:?}!");
+                println!(
+                    "While attempting to steal task from other peer: {:?}",
+                    other_peer.0
+                );
+                continue;
+            }
         };
 
-        // Message id 1 is "steal task" for peers
-        let Ok(_) = other_peer_connection.write_u8(1).await else {
-            println!(
-                "Notice: Couldn't send message id to other peer: {:?} for task stealing!",
-                other_peer.0
-            );
-            continue;
-        };
-        let Ok(raw_res) = clustered::networking::read_buf(&mut other_peer_connection).await else {
-            println!("Notice: Couldn't receive task from other peer {other_peer:?}!");
-            continue;
-        };
-        let Ok(res) = serde_json::from_slice::<'_, Option<Task>>(&raw_res) else {
-            println!("Notice: Couldn't deserialise task from other peer {other_peer:?}!");
-            continue;
-        };
         if let Some(tsk) = res {
-            let mut task_queue_lock = task_queue.lock().await;
-            task_queue_lock.push(tsk);
-            drop(task_queue_lock);
-            println!("Info: Just stole a task from: {:?}!", other_peer);
+            println!("Info: Just stole a task, from: {:?}!", other_peer.0);
+            task_queue.lock().await.push(tsk);
             break;
         }
     }
     Ok(())
 }
 
-const MINIMUM_TASKS_TRESH: usize = 1;
-
-async fn runner(task_queue: TaskQueueType, tracker_connection: Arc<Mutex<TcpStream>>) {
+async fn runner(
+    task_queue: TaskQueueType,
+    output_buffer_registry: BufferRegistryType,
+    notifier_registry: NotifierRegistryType,
+    tracker_connection: Arc<Mutex<TcpStream>>,
+) {
     let instance = wgpu::Instance::new(InstanceDescriptor::default());
     let adapter = instance
         .request_adapter(&RequestAdapterOptions {
@@ -179,6 +331,7 @@ async fn runner(task_queue: TaskQueueType, tracker_connection: Arc<Mutex<TcpStre
             if clustered::networking::was_connection_severed(err.kind()) {
                 println!("FATAL: Lost connection to tracker!");
             } else {
+                println!("Error:");
                 println!("{err}");
             }
         }
@@ -190,16 +343,23 @@ async fn runner(task_queue: TaskQueueType, tracker_connection: Arc<Mutex<TcpStre
         if let Some(tsk) = task_queue_guard.pop() {
             drop(task_queue_guard);
             task_queue_len -= 1;
-            if task_queue_len <= MINIMUM_TASKS_TRESH {
+            if task_queue_len <= MINIMUM_TASKS_BEFORE_START_STEALING_TRESH {
                 tokio::spawn(steal_task_wrapper(
                     task_queue.clone(),
                     tracker_connection.clone(),
                 ));
             }
-            consume_task(tsk, &device, &queue).await;
+            consume_task(
+                tsk,
+                output_buffer_registry.clone(),
+                notifier_registry.clone(),
+                &device,
+                &queue,
+            )
+            .await;
         } else {
             drop(task_queue_guard);
-            // Queue is empty, there's no point in spawning task_queue to run concurrently as we need to wait for a task to be stolen anyways
+            // Queue is empty, there's no point in spawning steal_task to run concurrently as we need to wait for a task to be stolen anyways
             // This also ensures that steal_task doesn't get spammed in parallel when the queue is empty causing the equivalent of a fork bomb
             steal_task_wrapper(task_queue.clone(), tracker_connection.clone()).await;
         }
@@ -209,6 +369,8 @@ async fn runner(task_queue: TaskQueueType, tracker_connection: Arc<Mutex<TcpStre
 async fn handle_other_peer(
     mut other_stream: TcpStream,
     task_queue: TaskQueueType,
+    output_buffer_registry: BufferRegistryType,
+    notifier_registry: NotifierRegistryType,
 ) -> io::Result<()> {
     let magic_sequence = String::from_utf8(
         clustered::networking::read_buf(&mut other_stream).await?,
@@ -216,7 +378,7 @@ async fn handle_other_peer(
     .map_err(|err| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Error: Bad magic sequence, it's not utf-8, error was: {err}"),
+            format!("Error: {err}\nWhile parsing magic sequence"),
         )
     })?;
 
@@ -232,7 +394,7 @@ async fn handle_other_peer(
             io::Error::new(
                 err.kind(),
                 format!(
-                    "Error: Failed to receive message id from peer {:?}, error was: {err}!",
+                    "Error: {err}\nWhile receiving message id from peer {:?}",
                     other_stream.peer_addr()
                 ),
             )
@@ -240,9 +402,9 @@ async fn handle_other_peer(
         match message_id {
             1 => {
                 // Other peer wants to steal from us
-                // Let's just pick at random for now
+                // TODO: We just pick at random for now
                 let mut task_queue_lock = task_queue.lock().await;
-                let response = if task_queue_lock.len() <= 4 {
+                let response = if task_queue_lock.len() <= NO_STEAL_TRESHOLD {
                     // We don't have enough tasks to benefit from giving to someone else
                     // by the time it takes to transfer the task and and receive the result we are better off just running the task ourselves
                     None
@@ -250,6 +412,7 @@ async fn handle_other_peer(
                     task_queue_lock.pop()
                 };
                 drop(task_queue_lock);
+
                 let serialised_response = serde_json::to_vec(&response)
                     .unwrap_or_else(|err| {
                         println!("Notice: Couldn't serialise task, sending empty response instead, this is probably a bug in the serialising implementation, error was: {err}!");
@@ -262,12 +425,50 @@ async fn handle_other_peer(
                         io::Error::new(
                             err.kind(),
                             format!(
-                                "Error: Failed to send task to peer: {:?}, error was: {err}",
+                                "Error: {err}\n While sending task to peer: {:?}",
                                 other_stream.peer_addr()
                             ),
                         )
                     })?;
             }
+            2 => {
+                // Other peer wants to send us a task result
+                let task_uuid = Uuid::from_u128(
+                    other_stream.read_u128().await.map_err(|err| {
+                    io::Error::new(
+                        err.kind(),
+                        format!(
+                            "Error: {err}\nWhile receiveing uuid from peer {:?}\nWhile handling return task result message from peer {:?}",
+                            other_stream.peer_addr(), other_stream.peer_addr()
+                        ),
+                    )
+                })?
+                );
+
+                let data = clustered::networking::read_buf(&mut other_stream).await.map_err(|err| {
+                    io::Error::new(
+                        err.kind(),
+                        format!(
+                            "Error: {err}\n While receiveing buffer data from peer {:?}\nWhile handling return task result message from peer {:?}",
+                            other_stream.peer_addr(), other_stream.peer_addr()
+                        ),
+                    )
+                })?;
+
+                if let Some(buf) = output_buffer_registry.write().await.get_mut(&task_uuid) {
+                    *buf = data;
+                } else {
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!("Error: Task UUID {task_uuid}, received from peer not found in our buffer registry!"),
+                    ));
+                };
+
+                if let Some(notifier) = notifier_registry.read().await.get(&task_uuid) {
+                    notifier.add_permits(Semaphore::MAX_PERMITS);
+                }
+            }
+
             _ => {
                 println!(
                     "Notice: Unknown message id({:?}) received from peer({:?})!",
@@ -279,60 +480,30 @@ async fn handle_other_peer(
     }
 }
 
-async fn start_peer(tracker_addr: SocketAddr) -> io::Result<(Ipv4Addr, TaskQueueType, TcpStream)> {
-    let mut tracker_connection = TcpStream::connect(tracker_addr).await.map_err(|err| {
-        io::Error::new(
-            err.kind(),
-            format!("Error: Connection to tracker failed, error was: {err}!"),
-        )
-    })?;
-
-    let tracker_magic = clustered::networking::read_buf(&mut tracker_connection)
-        .await
-        .map_err(|err| {
-            io::Error::new(
-                err.kind(),
-                format!("Error: Connection to tracker failed, error was: {err}!"),
-            )
-        })?;
-
-    if tracker_magic != MAGIC_TRACKER_SEQUENCE.as_bytes() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "Error: Bad magic: {:?} received from tacker: {:?}",
-                String::from_utf8(tracker_magic),
-                tracker_connection.peer_addr()
-            ),
-        ));
-    }
+#[tokio::main]
+async fn main() {
+    let (our_ip, peer2peer_port, tracker_connection) =
+        connect_to_tracker(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1337)))
+            .await
+            .unwrap_or_else(|err| panic!("FATAL:\n{err}"));
 
     println!(
         "Info: Connected to tracker: {:?}!",
         tracker_connection.peer_addr()
     );
 
-    let our_ip = Ipv4Addr::from_bits(tracker_connection.read_u32().await.map_err(|err| {
-        io::Error::new(
-            err.kind(),
-            format!("Error: Connection to tracker failed, error was: {err}!"),
-        )
-    })?);
-
-    let peer2peer_port = tracker_connection.read_u16().await.map_err(|err| {
-        io::Error::new(
-            err.kind(),
-            format!("Error: Connection to tracker failed, error was: {err}!"),
-        )
-    })?;
-
-    let queue: Arc<Mutex<Vec<Task>>> = Arc::from(Mutex::from(Vec::new()));
+    let task_queue: TaskQueueType = Default::default();
+    let output_buffer_registry: BufferRegistryType = Default::default();
+    let notifier_registry: NotifierRegistryType = Default::default();
 
     {
         // Start listening for other peers
 
-        async fn handle_other_peer_wrapper(other_stream: TcpStream, task_queue: TaskQueueType) {
-            if let Err(err) = handle_other_peer(other_stream, task_queue).await {
+        async fn handle_other_peer_wrapper(
+            other_stream: TcpStream,
+            extra: (TaskQueueType, BufferRegistryType, NotifierRegistryType),
+        ) {
+            if let Err(err) = handle_other_peer(other_stream, extra.0, extra.1, extra.2).await {
                 if !clustered::networking::was_connection_severed(err.kind()) {
                     println!("{err}");
                 }
@@ -342,25 +513,24 @@ async fn start_peer(tracker_addr: SocketAddr) -> io::Result<(Ipv4Addr, TaskQueue
         tokio::spawn(clustered::networking::listen(
             SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, peer2peer_port)),
             handle_other_peer_wrapper,
-            queue.clone(),
+            (
+                task_queue.clone(),
+                output_buffer_registry.clone(),
+                notifier_registry.clone(),
+            ),
         ));
     }
 
-    Ok((our_ip, queue, tracker_connection))
-}
-
-#[tokio::main]
-async fn main() {
-    let (our_ip, task_queue, tracker_connection) =
-        start_peer(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1337)))
-            .await
-            .unwrap();
-
     tokio::spawn(runner(
         task_queue.clone(),
+        output_buffer_registry.clone(),
+        notifier_registry.clone(),
         Arc::new(Mutex::new(tracker_connection)),
     ));
-    sleep(Duration::MAX).await;
+
+    // And now do normal peer stuff, like adding tasks to the queue and waiting for the results
+    // sleep(Duration::MAX).await;
+
     let mut program_file = OpenOptions::new()
         .read(true)
         .open("program-capsule.json")
@@ -377,30 +547,64 @@ async fn main() {
         .expect("Program file should be able to be deserialised!");
     println!("Program loaded!");
     let mut tq = Vec::new();
-    for i in 0..10 {
-        let tst_program = test_program.clone();
-        let tsk_queue = task_queue.clone();
+    for _ in 0..30 {
+        let time_start = Instant::now();
+        let task_id = Uuid::now_v7();
+        output_buffer_registry
+            .write()
+            .await
+            .insert(task_id, Vec::new());
+        notifier_registry
+            .write()
+            .await
+            .insert(task_id, Arc::from(Semaphore::new(0)));
+        task_queue.lock().await.push(Task {
+            program: test_program.clone(),
+            return_addr: SocketAddrV4::new(our_ip, peer2peer_port),
+            id: task_id.as_u128(),
+        });
+
+        let buf_reg_clone = output_buffer_registry.clone();
+        let notif_reg_clone = notifier_registry.clone();
         tq.push(tokio::spawn(async move {
-            let time_start = Instant::now();
-            tsk_queue.lock().await.push(Task {
-                program: tst_program,
-                return_addr: SocketAddrV4::new(our_ip, 3499 + i),
-            });
-            let result_listener = TcpListener::bind(SocketAddrV4::new(our_ip, 3499 + i))
+            let sem = notif_reg_clone
+                .read()
                 .await
-                .unwrap();
-            let (mut result_stream, _) = result_listener.accept().await.unwrap();
-            let raw_res = clustered::networking::read_buf(&mut result_stream)
-                .await
-                .unwrap();
-            let time_end = Instant::now();
+                .get(&task_id)
+                .expect("Task should have notifier!")
+                .clone();
+
+            let _ = sem.acquire().await.expect("Semaphore shouldn't close!");
+            let buf_reg_lock = buf_reg_clone.read().await;
+            let raw_res = buf_reg_lock
+                .get(&task_id)
+                .expect("Task should have output buffer!");
             assert!(raw_res.len() == core::mem::size_of::<f32>() * 4000 * 4000);
-            println!("Took {}s", (time_end - time_start).as_secs_f32());
+            let time_end = Instant::now();
+            drop(buf_reg_lock);
+
+            buf_reg_clone.write().await.remove(&task_id);
+            notif_reg_clone.write().await.remove(&task_id);
+            println!("Took: {}s!", (time_end - time_start).as_secs_f32());
         }));
     }
 
     for f in tq {
         f.await.unwrap();
     }
-    println!("Info: Exiting...");
+
+    while !task_queue.lock().await.is_empty() {
+        sleep(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
+    }
+
+    assert!(output_buffer_registry.read().await.is_empty());
+    assert!(notifier_registry.read().await.is_empty());
+    assert!(task_queue.lock().await.is_empty());
+
+    println!("Info(HACK: because i can't properly wait for all tasks to finish correctly yet): Press any key to exit...");
+    {
+        let mut junk_buf = Vec::new();
+        let _ = tokio::io::stdin().read(&mut junk_buf).await.unwrap();
+    }
 }

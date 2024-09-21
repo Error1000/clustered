@@ -19,7 +19,13 @@ struct PeerAddr(SocketAddrV4);
 async fn handle_peer(mut peer: TcpStream, peer_registry: Arc<Mutex<HashSet<PeerAddr>>>) {
     let peer_addr = match peer.peer_addr() {
         Ok(SocketAddr::V4(val)) => val,
-        _ => return,
+        _ => {
+            println!(
+                "Notice: Peer has address {:?}. which we do not support!",
+                peer.peer_addr()
+            );
+            return;
+        }
     };
 
     // Send magic bytes
@@ -45,10 +51,8 @@ async fn handle_peer(mut peer: TcpStream, peer_registry: Arc<Mutex<HashSet<PeerA
     // This is realistically only the case if the same computer has multiple peers running, but it is possible.
     // So to avoid a collision this mechanism was created.
     let mut peer2peer_port = 8008;
-
     {
         let mut registry_lock = peer_registry.lock().await;
-
         // Try to insert peer into registry
         loop {
             let is_unique =
@@ -65,16 +69,19 @@ async fn handle_peer(mut peer: TcpStream, peer_registry: Arc<Mutex<HashSet<PeerA
                 }
             }
         }
+    }
 
-        // Send p2p port to it
-        if let Err(err) = peer.write_u16(peer2peer_port).await {
-            assert!(registry_lock.remove(&PeerAddr(SocketAddrV4::new(
+    // Send p2p port to it
+    if let Err(err) = peer.write_u16(peer2peer_port).await {
+        assert!(peer_registry
+            .lock()
+            .await
+            .remove(&PeerAddr(SocketAddrV4::new(
                 *peer_addr.ip(),
                 peer2peer_port,
             ))));
-            println!("Notice: Peer {peer_addr:?} connected but i can't communicate with it, giving up on it, error was: {err}!");
-            return;
-        }
+        println!("Notice: Peer {peer_addr:?} connected but i failed to send p2p port to it, giving up on it, error was: {err}!");
+        return;
     }
 
     println!(
@@ -101,8 +108,8 @@ async fn handle_peer(mut peer: TcpStream, peer_registry: Arc<Mutex<HashSet<PeerA
 
         match command_id {
             1 => {
-                // This is the command if for the "List peers" command
-                let mut list_copy = (*peer_registry.lock().await).clone();
+                // This is the "List peers" command
+                let mut list_copy = peer_registry.lock().await.clone();
 
                 // Remove receiving peer from list
                 // TODO: Should peers do this themselves?
@@ -139,13 +146,13 @@ async fn handle_peer(mut peer: TcpStream, peer_registry: Arc<Mutex<HashSet<PeerA
     }
 
     // If we exit the loop that means the peer disconnected, so remove it before exiting
-    peer_registry
+    assert!(peer_registry
         .lock()
         .await
         .remove(&PeerAddr(SocketAddrV4::new(
             *peer_addr.ip(),
             peer2peer_port,
-        )));
+        ))));
 
     println!(
         "Info: Peer {:?}, with p2p port: {:?}, disconnected!",
@@ -156,7 +163,7 @@ async fn handle_peer(mut peer: TcpStream, peer_registry: Arc<Mutex<HashSet<PeerA
 
 #[tokio::main]
 async fn main() {
-    let peer_registry = Arc::new(Mutex::new(HashSet::<PeerAddr>::new()));
+    let peer_registry = Arc::new(Mutex::from(HashSet::<PeerAddr>::new()));
     println!("Info: Tracker online, listening...");
     clustered::networking::listen(
         SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 1337)),
