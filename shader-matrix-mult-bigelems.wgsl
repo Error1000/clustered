@@ -1,7 +1,7 @@
 struct InData {
-    matrix1_ncols: u32,
-    matrix1_nrows: u32,
-    matrix2_ncols: u32,
+    matrix1_ncols: u32, // i
+    matrix1_nrows: u32, // h
+    matrix2_ncols: u32, // w
     // matrix2_nrows == matrix1_ncols
     output_matrix_order: u32, // 1 = column major, 2 = row major
     matrix_data: array<mat4x4f>,

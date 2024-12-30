@@ -83,7 +83,7 @@ pub fn run_shader(params: RunShaderParams<'_>) -> Option<()> {
 
     let mut metadata_var = [0u8; core::mem::size_of::<u32>()];
     let meta_buf = params.device.create_buffer(&BufferDescriptor {
-        label: Some("Metadata compute uniform buffer"),
+        label: None,
         size: metadata_var.len() as u64,
         usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         mapped_at_creation: false,
@@ -92,7 +92,7 @@ pub fn run_shader(params: RunShaderParams<'_>) -> Option<()> {
     let bind_group_0_layout = params
         .device
         .create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("Compute pipeline bind group layout"),
+            label: None,
             entries: &[
                 BindGroupLayoutEntry {
                     binding: 0,
@@ -131,7 +131,7 @@ pub fn run_shader(params: RunShaderParams<'_>) -> Option<()> {
         .device
         .create_pipeline_layout(&PipelineLayoutDescriptor {
             bind_group_layouts: &[&bind_group_0_layout],
-            label: Some("Compute pipeline layout"),
+            label: None,
             push_constant_ranges: &[],
         });
 
@@ -139,7 +139,7 @@ pub fn run_shader(params: RunShaderParams<'_>) -> Option<()> {
         .device
         .create_compute_pipeline(&ComputePipelineDescriptor {
             entry_point: params.entry_point,
-            label: Some("Compute pipeline"),
+            label: None,
             layout: Some(&compute_pipeline_layout),
             module: params.program,
             compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -147,7 +147,7 @@ pub fn run_shader(params: RunShaderParams<'_>) -> Option<()> {
         });
 
     let bind_group_0 = params.device.create_bind_group(&BindGroupDescriptor {
-        label: Some("Bind group 0"),
+        label: None,
         layout: &bind_group_0_layout,
         entries: &[
             BindGroupEntry {

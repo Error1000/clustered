@@ -8,7 +8,7 @@ pub trait Matrix {
 }
 
 #[macro_export]
-macro_rules! matrix_impl {
+macro_rules! matrix_derive {
     ($struct_name:ident) => {
         impl<MatrixElem> Index<(usize, usize)> for $struct_name<MatrixElem> {
             type Output = MatrixElem;
@@ -51,6 +51,7 @@ pub struct ColMajorMatrix<MatrixElem> {
 
 impl<MatrixElem> Matrix for ColMajorMatrix<MatrixElem> {
     fn index_to_offset(&self, index: (usize, usize)) -> usize {
+        assert!(index.0 < self.nrows() && index.1 < self.ncols());
         // i + j * number_of_elems_in_column
         index.1 * self.nrows() + index.0
     }
@@ -63,7 +64,7 @@ impl<MatrixElem> Matrix for ColMajorMatrix<MatrixElem> {
         self.ncols.try_into().unwrap()
     }
 }
-matrix_impl!(ColMajorMatrix);
+matrix_derive!(ColMajorMatrix);
 
 impl<MatrixElem> ColMajorMatrix<MatrixElem> {
     pub fn new(nrows: u32, ncols: u32) -> Self
@@ -86,6 +87,7 @@ impl<MatrixElem> ColMajorMatrix<MatrixElem> {
         self.nrows() * self.ncols()
     }
 
+    #[allow(dead_code)]
     pub fn transpose_lazy(self) -> RowMajorMatrix<MatrixElem> {
         RowMajorMatrix {
             nrows: self.ncols,
@@ -104,6 +106,7 @@ pub struct RowMajorMatrix<MatrixElem> {
 
 impl<MatrixElem> Matrix for RowMajorMatrix<MatrixElem> {
     fn index_to_offset(&self, index: (usize, usize)) -> usize {
+        assert!(index.0 < self.nrows() && index.1 < self.ncols());
         // j + i * number_of_elems_in_row
         index.1 + index.0 * (usize::try_from(self.ncols).unwrap())
     }
@@ -116,7 +119,7 @@ impl<MatrixElem> Matrix for RowMajorMatrix<MatrixElem> {
         self.ncols.try_into().unwrap()
     }
 }
-matrix_impl!(RowMajorMatrix);
+matrix_derive!(RowMajorMatrix);
 
 impl<MatrixElem> RowMajorMatrix<MatrixElem> {
     pub fn new(nrows: u32, ncols: u32) -> Self
@@ -139,6 +142,7 @@ impl<MatrixElem> RowMajorMatrix<MatrixElem> {
         self.nrows() * self.ncols()
     }
 
+    #[allow(dead_code)]
     pub fn transpose_lazy(self) -> ColMajorMatrix<MatrixElem> {
         ColMajorMatrix {
             ncols: self.nrows,

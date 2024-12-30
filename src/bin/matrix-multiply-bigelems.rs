@@ -35,11 +35,12 @@ impl<MatrixElem> RowMajorMat4x4<MatrixElem> {
         4
     }
     fn index_to_offset(&self, index: (usize, usize)) -> usize {
-        assert!(index.0 < 4 && index.1 < 4);
-        index.0 * 4 + index.1
+        assert!(index.0 < self.nrows() && index.1 < self.ncols());
+        let n_elems_per_row = self.ncols();
+        index.0 * n_elems_per_row + index.1
     }
 }
-matrix_impl!(RowMajorMat4x4);
+matrix_derive!(RowMajorMat4x4);
 
 impl<MatrixElem> ColMajorMat4x4<MatrixElem> {
     fn nrows(&self) -> usize {
@@ -49,11 +50,12 @@ impl<MatrixElem> ColMajorMat4x4<MatrixElem> {
         4
     }
     fn index_to_offset(&self, index: (usize, usize)) -> usize {
-        assert!(index.0 < 4 && index.1 < 4);
-        index.1 * 4 + index.0
+        assert!(index.0 < self.nrows() && index.1 < self.ncols());
+        let n_elems_per_col = self.nrows();
+        index.1 * n_elems_per_col + index.0
     }
 }
-matrix_impl!(ColMajorMat4x4);
+matrix_derive!(ColMajorMat4x4);
 
 struct InData<'a> {
     matrix1_ncols: u32,
@@ -113,15 +115,15 @@ async fn main() {
         .read_to_string(&mut cs_source)
         .unwrap();
 
-    // let mut buf = String::new();
-    // std::io::stdin().read_line(&mut buf).unwrap();
-    // let mut rng = StdRng::seed_from_u64(buf.trim().parse::<u64>().unwrap());
-    // drop(buf);
-    let mut rng = StdRng::from_entropy();
+    let mut buf = String::new();
+    std::io::stdin().read_line(&mut buf).unwrap();
+    let mut rng = StdRng::seed_from_u64(buf.trim().parse::<u64>().unwrap());
+    drop(buf);
+    //let mut rng = StdRng::from_entropy();
 
     // According to the wgsl specs, section 16.1.2.14, matrix variables are column major
-    let mut left_mat = ColMajorMatrix::<ColMajorMat4x4<f32>>::new(4000 / 4, 4000 / 4);
-    let mut right_mat = RowMajorMatrix::<ColMajorMat4x4<f32>>::new(4000 / 4, 4000 / 4);
+    let mut left_mat = ColMajorMatrix::<ColMajorMat4x4<f32>>::new(4 / 4, 4 / 4);
+    let mut right_mat = RowMajorMatrix::<ColMajorMat4x4<f32>>::new(4 / 4, 4 / 4);
 
     for i in 0..left_mat.nrows() * 4 {
         for j in 0..left_mat.ncols() * 4 {
@@ -135,6 +137,21 @@ async fn main() {
         }
     }
 
+    /*
+      for i in 0..left_mat.nrows() * 4 {
+          for j in 0..left_mat.ncols() * 4 {
+              print!("{:?} ", left_mat[(i / 4, j / 4)][(i % 4, j % 4)]);
+          }
+          println!();
+      }
+
+      for i in 0..right_mat.nrows() * 4 {
+          for j in 0..right_mat.ncols() * 4 {
+              print!("{:?} ", right_mat[(i / 4, j / 4)][(i % 4, j % 4)]);
+          }
+          println!();
+      }
+    */
     let out_matrix_type = 1;
     let out_mat_nrows = left_mat.nrows;
     let out_mat_ncols = right_mat.ncols;
@@ -206,10 +223,10 @@ async fn main() {
     let time_end = Instant::now();
     assert!(res.data.len() == usize::try_from(out_mat_nrows * out_mat_ncols).unwrap());
     println!("Took {}s!", (time_end - time_start).as_secs_f64());
-    // for i in 0..res.nrows() * 4 {
-    //     for j in 0..res.ncols() * 4 {
-    //         print!("{:?} ", res[(i / 4, j / 4)][(i % 4, j % 4)]);
-    //     }
-    //     println!();
-    // }
+    for i in 0..res.nrows() * 4 {
+        for j in 0..res.ncols() * 4 {
+            print!("{:?} ", res[(i / 4, j / 4)][(i % 4, j % 4)]);
+        }
+        println!();
+    }
 }

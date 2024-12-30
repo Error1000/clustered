@@ -2,7 +2,10 @@ use std::{
     collections::HashMap,
     io::{self, ErrorKind},
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, AtomicU64},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -32,6 +35,10 @@ struct Task {
 }
 
 type TaskQueueType = Arc<Mutex<Vec<Task>>>;
+
+// TODO: Implement buffer types
+// 1. Initialised read only buffers, stealing these just copies them as they cannot be changes by ahything, neither the task or a peer after they have been created
+// 2. Read-Write buffers, stealing these causes the original owner to lose access, also these can be written to by other peers
 type BufferRegistryType = Arc<RwLock<HashMap<Uuid, Vec<u8>>>>;
 type NotifierRegistryType = Arc<RwLock<HashMap<Uuid, Arc<Semaphore>>>>;
 
@@ -108,6 +115,7 @@ async fn return_data(
     task_id: Uuid,
     output_buffer_registry: BufferRegistryType,
     notifier_registry: NotifierRegistryType,
+    nrunning_tasks: Arc<AtomicU64>,
 ) {
     // We could test if the return_addr is ourselves, but it's easier to just search for the uuid in our registry
     // and if we have it then the return_addr is ourselves otherwise it's someone else and we need to connect to them.
@@ -155,6 +163,7 @@ async fn return_data(
             println!("While returning data to other peer: {return_addr}");
         }
     }
+    nrunning_tasks.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
 }
 
 async fn consume_task(
@@ -163,7 +172,9 @@ async fn consume_task(
     notifier_registry: NotifierRegistryType,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    nrunning_tasks: Arc<AtomicU64>,
 ) {
+    nrunning_tasks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     println!("Info: Consuming task!");
     let task_uuid = Uuid::from_u128(task.id);
     let Some(result) = task.program.run(device, queue).await else {
@@ -176,6 +187,7 @@ async fn consume_task(
         task_uuid,
         output_buffer_registry,
         notifier_registry,
+        nrunning_tasks,
     ));
 }
 
@@ -293,11 +305,41 @@ async fn steal_task(
     Ok(())
 }
 
+async fn theif(
+    task_queue: TaskQueueType,
+    tracker_connection: Arc<Mutex<TcpStream>>,
+    stop_stealing: Arc<AtomicBool>,
+) {
+    async fn steal_task_wrapper(
+        task_queue: TaskQueueType,
+        tracker_connection: Arc<Mutex<TcpStream>>,
+    ) {
+        if let Err(err) = steal_task(task_queue, tracker_connection).await {
+            if clustered::networking::was_connection_severed(err.kind()) {
+                println!("FATAL: Lost connection to tracker!");
+            } else {
+                println!("Error:");
+                println!("{err}");
+            }
+        }
+    }
+
+    while !stop_stealing.load(std::sync::atomic::Ordering::SeqCst) {
+        let task_queue_len = task_queue.lock().await.len();
+        if task_queue_len <= MINIMUM_TASKS_BEFORE_START_STEALING_TRESH {
+            steal_task_wrapper(task_queue.clone(), tracker_connection.clone()).await;
+        } else {
+            // Reduce task queue lock contention
+            sleep(Duration::from_millis(100)).await;
+        }
+    }
+}
+
 async fn runner(
     task_queue: TaskQueueType,
     output_buffer_registry: BufferRegistryType,
     notifier_registry: NotifierRegistryType,
-    tracker_connection: Arc<Mutex<TcpStream>>,
+    nrunning_tasks: Arc<AtomicU64>,
 ) {
     let instance = wgpu::Instance::new(InstanceDescriptor::default());
     let adapter = instance
@@ -323,45 +365,22 @@ async fn runner(
         .await
         .expect("Should be able to get handle on device!");
 
-    async fn steal_task_wrapper(
-        task_queue: TaskQueueType,
-        tracker_connection: Arc<Mutex<TcpStream>>,
-    ) {
-        if let Err(err) = steal_task(task_queue, tracker_connection).await {
-            if clustered::networking::was_connection_severed(err.kind()) {
-                println!("FATAL: Lost connection to tracker!");
-            } else {
-                println!("Error:");
-                println!("{err}");
-            }
-        }
-    }
-
     loop {
         let mut task_queue_guard = task_queue.lock().await;
-        let mut task_queue_len = task_queue_guard.len();
         if let Some(tsk) = task_queue_guard.pop() {
             drop(task_queue_guard);
-            task_queue_len -= 1;
-            if task_queue_len <= MINIMUM_TASKS_BEFORE_START_STEALING_TRESH {
-                tokio::spawn(steal_task_wrapper(
-                    task_queue.clone(),
-                    tracker_connection.clone(),
-                ));
-            }
             consume_task(
                 tsk,
                 output_buffer_registry.clone(),
                 notifier_registry.clone(),
                 &device,
                 &queue,
+                nrunning_tasks.clone(),
             )
             .await;
         } else {
-            drop(task_queue_guard);
-            // Queue is empty, there's no point in spawning steal_task to run concurrently as we need to wait for a task to be stolen anyways
-            // This also ensures that steal_task doesn't get spammed in parallel when the queue is empty causing the equivalent of a fork bomb
-            steal_task_wrapper(task_queue.clone(), tracker_connection.clone()).await;
+            // Reduce lock contention
+            sleep(Duration::from_millis(100)).await;
         }
     }
 }
@@ -495,6 +514,8 @@ async fn main() {
     let task_queue: TaskQueueType = Default::default();
     let output_buffer_registry: BufferRegistryType = Default::default();
     let notifier_registry: NotifierRegistryType = Default::default();
+    let nrunning_tasks: Arc<AtomicU64> = Arc::from(AtomicU64::from(0)); // Keeps track of how many tasks are currently running
+    let stop_stealing: Arc<AtomicBool> = Arc::from(AtomicBool::from(false));
 
     {
         // Start listening for other peers
@@ -525,10 +546,16 @@ async fn main() {
         task_queue.clone(),
         output_buffer_registry.clone(),
         notifier_registry.clone(),
-        Arc::new(Mutex::new(tracker_connection)),
+        nrunning_tasks.clone(),
     ));
 
-    // And now do normal peer stuff, like adding tasks to the queue and waiting for the results
+    let theif_handle = tokio::spawn(theif(
+        task_queue.clone(),
+        Arc::from(Mutex::from(tracker_connection)),
+        stop_stealing.clone(),
+    ));
+
+    // And now we just run whatever we want by simply adding it to the queue and waiting for the notification
     // sleep(Duration::MAX).await;
 
     let mut program_file = OpenOptions::new()
@@ -593,18 +620,21 @@ async fn main() {
         f.await.unwrap();
     }
 
-    while !task_queue.lock().await.is_empty() {
+    // Stop stealing
+    stop_stealing.store(true, std::sync::atomic::Ordering::SeqCst);
+    theif_handle.await.unwrap();
+
+    // Wait for everything remaining to be executed
+    while nrunning_tasks.load(std::sync::atomic::Ordering::SeqCst) > 0
+        || task_queue.lock().await.len() > 0
+    {
         sleep(Duration::from_millis(10)).await;
-        tokio::task::yield_now().await;
     }
 
+    // Assert that everything has setteled down and quit
     assert!(output_buffer_registry.read().await.is_empty());
     assert!(notifier_registry.read().await.is_empty());
     assert!(task_queue.lock().await.is_empty());
-
-    println!("Info(HACK: because i can't properly wait for all tasks to finish correctly yet): Press any key to exit...");
-    {
-        let mut junk_buf = Vec::new();
-        let _ = tokio::io::stdin().read(&mut junk_buf).await.unwrap();
-    }
+    assert!(stop_stealing.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(nrunning_tasks.load(std::sync::atomic::Ordering::SeqCst) == 0);
 }
