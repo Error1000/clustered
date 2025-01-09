@@ -82,9 +82,10 @@ def try_input(nid):
 n_iter = args.n_iter
 found_bad_input = False
 
+print(f"Found {mp.cpu_count()} cpus!")
 import math
 if __name__ == '__main__':
-        with mp.Pool(math.ceil(mp.cpu_count()/2)) as pool:
+        with mp.Pool(math.ceil(mp.cpu_count()/8)) as pool:
                 for result in tqdm.tqdm(pool.imap_unordered(try_input, range(n_iter)), total=n_iter):
                     if result == False:
                         pool.terminate()

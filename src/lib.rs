@@ -138,7 +138,7 @@ pub fn run_shader(params: RunShaderParams<'_>) -> Option<()> {
     let compute_pipeline = params
         .device
         .create_compute_pipeline(&ComputePipelineDescriptor {
-            entry_point: params.entry_point,
+            entry_point: Some(params.entry_point),
             label: None,
             layout: Some(&compute_pipeline_layout),
             module: params.program,

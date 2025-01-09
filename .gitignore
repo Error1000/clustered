@@ -4,3 +4,6 @@
 /profile*.json
 /program*.json
 /callgrind*
+/autotune.zip
+/autotune-remove-above-tresh.sh
+/grid-search.py

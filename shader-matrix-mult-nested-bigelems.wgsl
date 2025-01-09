@@ -43,12 +43,13 @@ var<storage, read_write> out_data: array<mat4x4f>;
 @binding(2)
 var<uniform> goff: u32;
 
-const BIG_TILE_NROW_LEFT: u32 = u32(1);
+const BIG_TILE_NROW_LEFT: u32 = u32(4);
 const BIG_TILE_INNER_SIZE: u32 = u32(1);
-const BIG_TILE_NCOL_RIGHT: u32 = u32(1);
+const BIG_TILE_NCOL_RIGHT: u32 = u32(8);
 const LEFT_BIG_TILE_NELEM: u32 = BIG_TILE_NROW_LEFT*BIG_TILE_INNER_SIZE;
 const RIGHT_BIG_TILE_NELEM: u32 = BIG_TILE_INNER_SIZE*BIG_TILE_NCOL_RIGHT;
 const OUTPUT_BIG_TILE_NELEM: u32 = BIG_TILE_NROW_LEFT*BIG_TILE_NCOL_RIGHT;
+const NPERINSTANCE: u32 = ((LEFT_BIG_TILE_NELEM+RIGHT_BIG_TILE_NELEM)/OUTPUT_BIG_TILE_NELEM)+1;
 
 var<workgroup> left_big_tile: array<mat4x4f, LEFT_BIG_TILE_NELEM>;
 var<workgroup> right_big_tile: array<mat4x4f, RIGHT_BIG_TILE_NELEM>;
@@ -106,15 +107,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // The big right tile is at big_k, wid_j
         let big_right_tile_offset = in2.offset + get_row_major_offset(big_k, wid_j, in2.ncols)*RIGHT_BIG_TILE_NELEM;
-
-        if(raw_subid == 0){
-            // TODO: Paralellise loading the tiles into workgroup memory
-            for(var left_small_tile_i = u32(0); left_small_tile_i < LEFT_BIG_TILE_NELEM; left_small_tile_i++){
-                left_big_tile[left_small_tile_i] = in_data.matrix_data[big_left_tile_offset+left_small_tile_i];
-            }
-            for(var right_small_tile_i = u32(0); right_small_tile_i < RIGHT_BIG_TILE_NELEM; right_small_tile_i++){
-                right_big_tile[right_small_tile_i] = in_data.matrix_data[big_right_tile_offset+right_small_tile_i];
-            }
+        
+        for(var extrai: u32 = u32(0); extrai < NPERINSTANCE; extrai++){
+            var raw_copy_id = raw_subid*NPERINSTANCE+extrai;
+        if(raw_copy_id < LEFT_BIG_TILE_NELEM) {
+            left_big_tile[raw_copy_id] = in_data.matrix_data[big_left_tile_offset+raw_copy_id];
+        }else if(raw_copy_id-LEFT_BIG_TILE_NELEM < RIGHT_BIG_TILE_NELEM){
+            right_big_tile[raw_copy_id-LEFT_BIG_TILE_NELEM] = in_data.matrix_data[big_right_tile_offset+raw_copy_id-LEFT_BIG_TILE_NELEM];
+        }
         }
                 
         // Don't begin computing if some invocations haven't loaded their small tiles yet as the computations for us will rely on the small tiles "of somebody else" 

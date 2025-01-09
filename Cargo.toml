@@ -14,10 +14,10 @@ name="test-texture"
 [dependencies]
 env_logger = "0.11"
 log = "0.4"
-wgpu = { version = "22.1", features = ["spirv"] }
-tokio = {version = "1.40", features = ["full"] }
+wgpu = { version = "23.0", features = ["spirv"] }
+tokio = {version = "1.42", features = ["full"] }
 shaderc = "0.8"
-bytemuck = "1.18"
+bytemuck = "1.21"
 flume = "0.11"
 image = "0.25"
 rand = "0.8"
@@ -25,8 +25,8 @@ rayon = "1.10"
 futures = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_with = { version = "3.9", features = ["base64"] }
-uuid = {version = "1.10", features = [
+serde_with = { version = "3.12", features = ["base64"] }
+uuid = {version = "1.11", features = [
     "v7",                # Choose version
     "fast-rng",          # Use a faster (but still sufficiently random) RNG
     "macro-diagnostics", # Enable better diagnostics for compile-time UUIDs
